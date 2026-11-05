@@ -1,0 +1,69 @@
+# dxcompiler.dll built from DXC's NCSA-licensed source, without dxil.dll (#8513). The release zip's own copy can't
+# be shipped: its LICENSE-MS.txt names the whole package. An LLVM build takes about an hour, so the result is cached
+# by source revision and only a new DXC_COMMIT builds it again.
+name: Build dxcompiler.dll
+
+on:
+  push:
+    branches: ['ci/8513-dxc-build']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # microsoft/DirectXShaderCompiler v1.9.2609. Change the commit, not the tag: a tag can move.
+  DXC_COMMIT: 01b62ad47db7dee3dd33f90e7339cf9e860b3f93
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: dxc-out
+          key: dxcompiler-x64-${{ env.DXC_COMMIT }}-mt-1
+      - uses: actions/checkout@v7
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          repository: microsoft/DirectXShaderCompiler
+          ref: ${{ env.DXC_COMMIT }}
+          path: dxc-src
+          submodules: recursive
+          # The version the build embeds comes from the history.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.ATL -property installationPath`) do set VS=%%i
+          if not defined VS (echo Visual Studio with ATL not found & exit /b 1)
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          rem The C runtime linked in, as in the game: no Visual C++ redistributable on players' machines.
+          cmake -S dxc-src -B dxc-build -G Ninja -C dxc-src/cmake/caches/PredefinedParams.cmake ^
+            -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT -DHLSL_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_TESTS=OFF ^
+            -DENABLE_SPIRV_CODEGEN=OFF -DSPIRV_BUILD_TESTS=OFF || exit /b 1
+          ninja -C dxc-build dxcompiler || exit /b 1
+          mkdir dxc-out
+          copy dxc-build\bin\dxcompiler.dll dxc-out\ || exit /b 1
+          copy dxc-src\LICENSE.TXT dxc-out\ || exit /b 1
+          copy dxc-src\ThirdPartyNotices.txt dxc-out\ || exit /b 1
+      - name: Only system libraries, and what was built
+        shell: bash
+        run: |
+          python tools/check_imports.py dxc-out/dxcompiler.dll
+          ls -l dxc-out
+          sha256sum dxc-out/dxcompiler.dll
+          echo "DXC commit $DXC_COMMIT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dxcompiler-x64
+          path: dxc-out
+          if-no-files-found: error
+          retention-days: 14
