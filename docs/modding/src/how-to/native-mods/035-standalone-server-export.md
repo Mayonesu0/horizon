@@ -14,6 +14,14 @@ the canonical `horizon-native-mods/<id>/` projects and the provenance `native-mo
 host only (no cross compilation), needs a prepared installed launcher base release, and survives cache pruning
 because it is copied outside the managed folders. On Windows use the printed `horizon-engine.exe` path.
 
+For wasm mods that declare internals, put their `.hmod` packages directly in `FOLDER`, alongside any
+native projects. A folder containing only wasm packages with internals also works. The export compiles
+their declared internals and raw listener targets into the engine's table, without consulting an
+instance or its enabled-mod list. The selected paths are recorded in `native-mods.json` and changing
+them selects a new cached build. Packages without wasm internals do not select table entries.
+Install and enable the same `.hmod` packages in the server game folder's `horizon-mods/` as usual;
+the export carries the compiled table, not those packages or the server's configuration.
+
 A mod's crate depends on `horizon-mod-api` and never on the game: a `horizon-client` dependency,
 under any name or target, is refused naming the mod and the key, before toolchain work. The mod API
 has no sound or controller features, so server and client builds stage the same crate.

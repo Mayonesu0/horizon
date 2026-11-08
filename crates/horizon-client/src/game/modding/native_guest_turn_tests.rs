@@ -114,7 +114,8 @@ fn refused_wire_reload_preserves_hub_and_engine_generation() {
             &[],
         );
         let prepared = game.prepare_world_reload(&stack, &good, false).unwrap();
-        game.reload_world_tables(prepared);
+        game.install_world_tables(prepared);
+        game.run_native_advancement_grants();
         assert!(!Arc::ptr_eq(
             &before,
             &game.lan.as_ref().unwrap().hub.lan.shared.sync()

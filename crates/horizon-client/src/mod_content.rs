@@ -109,12 +109,54 @@ static FLUID_LOOKS: std::sync::RwLock<BTreeMap<String, FluidLook>> =
 
 /// Remembers how the mods' fluids look (`data/<id>/horizon/fluid/`), for what the client draws.
 pub fn set_fluid_looks(mods: &[ContentMod]) {
-    let looks = mods
+    let looks: BTreeMap<String, FluidLook> = mods
         .iter()
         .flat_map(|m| &m.content.fluids)
         .map(|f| (f.id.clone(), f.clone()))
         .collect();
+    crate::fluid_models::set_world_looks(looks.values());
     *FLUID_LOOKS.write().unwrap_or_else(|e| e.into_inner()) = looks;
+}
+
+/// Registers the world fluids the mods declare, before any block table is read from the root.
+/// Returns their registry names, source and flowing, for the fluid keys.
+pub fn register_world_fluids(
+    mods: &[ContentMod],
+) -> std::result::Result<Vec<String>, horizon_world::fluid::ModFluidRegistrationError> {
+    let mut names = Vec::new();
+    for look in mods.iter().flat_map(|m| &m.content.fluids) {
+        let Some(world) = look.world else { continue };
+        let flowing_id = look.flowing_id();
+        names.push(look.id.clone());
+        names.push(flowing_id.clone());
+        horizon_world::fluid::register_mod_fluid(horizon_world::fluid::ModFluidType {
+            id: look.id.clone(),
+            flowing_id,
+            bucket: look.bucket_id(),
+            rules: horizon_world::fluid::ModFluidRules {
+                tick_delay: world.tick_delay,
+                drop_off: world.drop_off,
+                slope_find_distance: world.slope_find_distance,
+                converts_to_source: world.source_conversion,
+            },
+        })?;
+    }
+    Ok(names)
+}
+
+/// Joins the world fluids native mods declare in code to the content mods of their namespaces:
+/// a fluid's file, if it has one, keeps saying how it looks.
+pub fn accept_world_fluids(mods: &mut [ContentMod], fluids: &[FluidLook]) {
+    for fluid in fluids {
+        let namespace = fluid.id.split_once(':').map_or("", |(ns, _)| ns);
+        let Some(owner) = mods.iter_mut().find(|m| m.id == namespace) else {
+            continue;
+        };
+        match owner.content.fluids.iter_mut().find(|f| f.id == fluid.id) {
+            Some(look) => look.world = fluid.world,
+            None => owner.content.fluids.push(fluid.clone()),
+        }
+    }
 }
 
 /// How the fluid `id` looks, when a mod declares it.
@@ -523,50 +565,11 @@ fn set_nbt_properties(state: &mut Tag, combo: &[(String, String)]) {
 
 // DiscreteVoxelShape.forAllEdges: merge consecutive boundary edges.
 fn shape_edges(shape: &VoxelShape) -> Vec<J> {
-    let sizes = shape.sizes();
-    let mut result = Vec::new();
-    for axis in [2, 0, 1] {
-        let a = (axis + 1) % 3;
-        let b = (axis + 2) % 3;
-        for u in 0..=sizes[a] {
-            for v in 0..=sizes[b] {
-                let mut start = None;
-                for t in 0..=sizes[axis] {
-                    let mut count = 0;
-                    let mut odd = 0;
-                    for du in 0..=1 {
-                        for dv in 0..=1 {
-                            let mut p = [0i32; 3];
-                            p[axis] = t as i32;
-                            p[a] = u as i32 + du - 1;
-                            p[b] = v as i32 + dv - 1;
-                            if shape.is_full(p[0], p[1], p[2]) {
-                                count += 1;
-                                odd ^= du ^ dv;
-                            }
-                        }
-                    }
-                    let edge = count == 1 || count == 3 || (count == 2 && odd == 0);
-                    if edge {
-                        if start.is_none() {
-                            start = Some(t);
-                        }
-                    } else if let Some(first) = start.take() {
-                        let mut from = [0.0; 3];
-                        let mut to = [0.0; 3];
-                        from[a] = shape.coordinates(Axis::ALL[a])[u];
-                        from[b] = shape.coordinates(Axis::ALL[b])[v];
-                        to[a] = from[a];
-                        to[b] = from[b];
-                        from[axis] = shape.coordinates(Axis::ALL[axis])[first];
-                        to[axis] = shape.coordinates(Axis::ALL[axis])[t];
-                        result.push(J::Arr(from.into_iter().chain(to).map(J::f64).collect()));
-                    }
-                }
-            }
-        }
-    }
-    result
+    shape
+        .edges()
+        .into_iter()
+        .map(|edge| J::Arr(edge.into_iter().map(J::f64).collect()))
+        .collect()
 }
 
 fn encode_shape(shape: &VoxelShape) -> Tag {
@@ -717,6 +720,7 @@ struct NewBlock<'a> {
     has_fluid: Vec<bool>,
     skylight: SkylightRule,
     custom_dampening: bool,
+    context_shapes: BTreeMap<String, Vec<VoxelShape>>,
     default: u32,
     /// The declared state properties' combinations, every property at its
     /// default first (one empty combination when the block declares none):
@@ -1346,6 +1350,18 @@ impl<'a> Plan<'a> {
                         );
                     }
                 }
+                let mut context_shapes = BTreeMap::new();
+                for (channel, specs) in [
+                    ("outline", &decl.outline_context_shapes),
+                    ("collision", &decl.collision_context_shapes),
+                ] {
+                    for (kind, spec) in specs {
+                        context_shapes.insert(format!("{channel}_{}", kind.name()), resolve(spec)?);
+                    }
+                }
+                if let Some(spec) = &decl.interaction_shapes {
+                    context_shapes.insert("interaction".into(), resolve(spec)?);
+                }
                 // The lookup from (template state, combination) to the state's row.
                 let mut rows = vec![0; order.len()];
                 for (position, &(state, combo)) in order.iter().enumerate() {
@@ -1378,6 +1394,7 @@ impl<'a> Plan<'a> {
                         .copied()
                         .unwrap_or(SkylightRule::Shape),
                     custom_dampening: custom_dampening.contains(&decl.template),
+                    context_shapes,
                     default,
                     combos,
                     order,
@@ -2056,6 +2073,49 @@ impl<'a> Plan<'a> {
                     indices.push((block.rename.first as usize + offset, id));
                 }
             }
+        }
+        // Variant references live in the same checked per-state table as the defaults.
+        // No runtime content scan, callback, or world-dependent registration is needed.
+        let mut contexts = Vec::new();
+        for block in &self.blocks {
+            if block.context_shapes.is_empty() {
+                continue;
+            }
+            let mut encoded = BTreeMap::new();
+            for offset in 0..block.order.len() {
+                let mut row = Compound::new();
+                row.insert(
+                    "state".into(),
+                    Tag::Int((block.rename.first as usize + offset) as i32),
+                );
+                for (channel, variants) in &block.context_shapes {
+                    let shape = &variants[offset];
+                    let key: Vec<_> = shape
+                        .boxes()
+                        .iter()
+                        .map(|bounds| {
+                            [
+                                bounds.min(Axis::X),
+                                bounds.min(Axis::Y),
+                                bounds.min(Axis::Z),
+                                bounds.max(Axis::X),
+                                bounds.max(Axis::Y),
+                                bounds.max(Axis::Z),
+                            ]
+                            .map(f64::to_bits)
+                        })
+                        .collect();
+                    let id = *encoded.entry(key).or_insert_with(|| {
+                        entries.push(encode_shape(shape));
+                        entries.len() as i32 - 1
+                    });
+                    row.insert(channel.as_str().into(), Tag::Int(id));
+                }
+                contexts.push(Tag::Compound(row));
+            }
+        }
+        if !contexts.is_empty() {
+            root.insert("context_shapes".into(), Tag::List(contexts));
         }
         let Some(Tag::IntArray(mapping)) = root.get_mut(&JavaString::from("cached_shapes")) else {
             return Err("collision table has no mapping".into());

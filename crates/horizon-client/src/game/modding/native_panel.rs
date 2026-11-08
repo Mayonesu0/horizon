@@ -517,6 +517,8 @@ impl Game<'_> {
             self.draw_carried(batch);
         } else if let Some(stack) = self.browser_pointed_stack(&layout) {
             self.draw_stack_tooltip(batch, &stack.1, cursor.0, cursor.1);
+        } else if let Some(fluid) = self.recipe_fluid_hovered(&layout) {
+            self.draw_fluid_tooltip(batch, &fluid, cursor.0, cursor.1);
         } else {
             self.draw_slot_tooltip(batch);
         }

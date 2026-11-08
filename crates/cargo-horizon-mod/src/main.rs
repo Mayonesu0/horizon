@@ -5,6 +5,8 @@
 //!   `--template native [--horizon <commit>]`, a native trait mod's bundle, pinned to the
 //!   newest prebuilt game unless `--horizon` names a commit.
 //! - `update [--horizon <commit>]`: repin this native mod and diff/refresh declared internals.
+//! - `inject sync --repo <game checkout>`: publish missing slots to a per-mod list.
+//! - `inject add <at> --kind <kind> [--call <callee>] [--nth N] [--with <fn>]`: pin an inject.
 //! - `internals sync [--repo <path>]`: sync declarations for native or wasm mods.
 //! - `internals add <path>… [--kind <kind>]`: declare internals from the prebuilt catalog.
 //! - `build`: the `.hmod` in `target/horizon-mod/`, with the mod's `assets/`
@@ -18,6 +20,8 @@
 //! - `use-jar <path>`: list an exact original Java jar as a passive asset/data source.
 use horizon_mod_package::{Content, Manifest, Package, index::native, manifest::MANIFEST};
 mod check;
+mod inject;
+mod inject_sync;
 mod internals;
 mod jar;
 mod registry;
@@ -58,8 +62,9 @@ fn main() -> ExitCode {
         Some("registry") => registry::main(&args[1..]),
         Some("use-jar") => jar::run(&args[1..]),
         Some("internals") => internals::run(&args[1..]),
+        Some("inject") => inject::run(&args[1..]),
         Some("update") => update(Path::new("."), flag(&args[1..], "--horizon")),
-        _ => Err("usage: cargo horizon-mod new <path> [--name \"Name\"] [--template content|native [--horizon <commit>]] | update [--horizon <commit>] | internals sync [--repo <path>] | internals add <path>… [--kind <kind>] | build [--wasm] | wasm-std <out.wasm> | run [--game <horizon-client>] [-- <game args>] | check <file> [--kind <kind>] [--key <public key> --signature <file.minisig>] [--json] | registry build|review|check|list | use-jar <path>".into()),
+        _ => Err("usage: cargo horizon-mod new <path> [--name \"Name\"] [--template content|native [--horizon <commit>]] | update [--horizon <commit>] | inject sync --repo <game checkout> | inject add <at> --kind <kind> [--call <canonical callee>] [--nth N] [--with <fn>] | internals sync [--repo <path>] | internals add <path>… [--kind <kind>] | build [--wasm] | wasm-std <out.wasm> | run [--game <horizon-client>] [-- <game args>] | check <file> [--kind <kind>] [--key <public key> --signature <file.minisig>] [--json] | registry build|review|check|list | use-jar <path>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

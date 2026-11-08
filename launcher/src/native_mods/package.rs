@@ -1,5 +1,5 @@
 //! Validated flat packages and launcher-owned horizon-mixins input.
-use super::{Bundle, Injection, InjectionSite, MANIFEST};
+use super::{Bundle, MANIFEST};
 use horizon_mod_package::{manifest, Package};
 use std::{fs, path::Path};
 
@@ -18,35 +18,13 @@ pub(super) fn read(dir: &Path) -> Result<Option<Bundle>, String> {
         return Ok(None);
     }
     let package = Package::read(dir)?;
-    let Some(native) = &package.manifest.native else {
+    if package.manifest.native.is_none() {
         return Ok(None);
-    };
-    let injections = native
-        .injection
-        .iter()
-        .map(|entry| {
-            let site = match (&entry.hook, &entry.target) {
-                (Some(hook), _) => InjectionSite::Hook(hook.clone()),
-                (_, Some(target)) => InjectionSite::Target(target.clone()),
-                _ => unreachable!("validated injection site"),
-            };
-            let kind = serde_json::to_value(entry.kind).expect("serializable injection kind");
-            Injection {
-                id: entry.id.clone(),
-                site,
-                kind: Some(kind.as_str().expect("kind is a string").to_owned()),
-                selector: entry.selector.clone(),
-                ordinal: entry.ordinal,
-                priority: entry.priority.unwrap_or_default(),
-                cancellable: entry.cancellable,
-            }
-        })
-        .collect();
+    }
     package.directory_files(dir)?;
     Ok(Some(Bundle {
         manifest: package.manifest,
         dir: dir.to_owned(),
-        injections,
     }))
 }
 
@@ -67,19 +45,6 @@ pub(super) fn tool_manifest(bundle: &Bundle) -> Result<(), String> {
             bundle.native().horizon.clone().into(),
         )])),
     );
-    // A point injection is the launcher's, not horizon-mixins' ([`super::inject`]).
-    let helpers: Vec<_> = bundle
-        .native()
-        .injection
-        .iter()
-        .filter(|injection| injection.helper.is_some())
-        .collect();
-    if !helpers.is_empty() {
-        manifest.insert(
-            "injection".into(),
-            toml::Value::try_from(&helpers).map_err(|e| e.to_string())?,
-        );
-    }
     if !bundle.native().module.is_empty() {
         manifest.insert(
             "module".into(),

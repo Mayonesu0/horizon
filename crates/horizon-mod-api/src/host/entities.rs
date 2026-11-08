@@ -574,12 +574,14 @@ pub trait EntitiesBackendMut {
     /// Side: server.
     /// Attempts to board a vehicle through the shared server mount path.
     ///
-    /// Players and mobs can ride a mob, boat or minecart. Returns false for
+    /// Players and mobs can ride a mob, boat, minecart or generic seat entity
+    /// (an armor stand, display, marker or interaction). Returns false for
     /// unsupported entity pairs, stale or held-out handles, a full stored
     /// vehicle, a cycle, or a canceled mount or dismount. Mob vehicle capacity
     /// follows its species; minecarts store one passenger and boats store one
-    /// mob and up to two passengers in total. `force` bypasses normal
-    /// admission checks, not these storage limits. Player boarding cooldown and the strider's
+    /// mob and up to two passengers in total. Generic seats admit one passenger unless forced.
+    /// `force` bypasses normal admission checks, not these storage limits.
+    /// Player boarding cooldown and the strider's
     /// eye-in-lava admission check are not yet represented by the game.
     #[access(WorldOnly)]
     fn entity_start_riding(&mut self, entity: EntityRef, vehicle: EntityRef, force: bool) -> bool;

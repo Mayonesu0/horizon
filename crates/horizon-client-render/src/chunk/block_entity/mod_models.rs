@@ -93,6 +93,27 @@ impl ModBlockEntity {
             }
         }
     }
+    /// Queue the one-shot fields the next block change sends, in place of any
+    /// waiting; an empty batch clears them. The runtime keeps them under this
+    /// entity's identity, so a save, a clone or a comparison never sees them
+    /// and the revision stays.
+    pub fn set_client_update_fields(&self, fields: Compound) {
+        horizon_mod_runtime::block_entities::set_client_update_fields(self.revision.born, fields);
+    }
+    /// Take the queued one-shot fields for a tag about to go to every viewer.
+    pub fn take_client_update_fields(&self) -> Option<Compound> {
+        horizon_mod_runtime::block_entities::take_client_update_fields(self.revision.born)
+    }
+    /// Whether one-shot fields wait for a block change.
+    pub fn has_client_update_fields(&self) -> bool {
+        horizon_mod_runtime::block_entities::has_client_update_fields(self.revision.born)
+    }
+}
+/// A removed or unloaded entity's queued fields go with it.
+impl Drop for ModBlockEntity {
+    fn drop(&mut self) {
+        drop(self.take_client_update_fields());
+    }
 }
 impl Default for ModBlockEntity {
     fn default() -> Self {
@@ -170,6 +191,28 @@ mod tests {
         assert_ne!(other_kind, machine);
         let fresh = ModBlockEntity::default();
         assert_ne!(fresh.revision(), ModBlockEntity::default().revision());
+    }
+
+    #[test]
+    fn queued_client_update_fields_stay_out_of_clones_and_go_with_their_entity() {
+        let machine = ModBlockEntity::new("mymod:machine".into(), Default::default());
+        let made = machine.revision();
+        let batch = Compound::from([("effect".into(), Tag::Int(23))]);
+        machine.set_client_update_fields(batch.clone());
+        assert_eq!(machine.revision(), made);
+        let copy = machine.clone();
+        assert_eq!(copy, machine);
+        assert!(!copy.has_client_update_fields());
+        drop(copy);
+        assert!(machine.has_client_update_fields());
+        assert_eq!(machine.take_client_update_fields(), Some(batch.clone()));
+        assert_eq!(machine.take_client_update_fields(), None);
+        machine.set_client_update_fields(batch);
+        drop(machine);
+        assert_eq!(
+            horizon_mod_runtime::block_entities::take_client_update_fields(made.identity()),
+            None
+        );
     }
 
     #[test]

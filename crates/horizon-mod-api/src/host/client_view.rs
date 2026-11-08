@@ -63,6 +63,18 @@ pub trait ClientViewClientHost {
     #[access(ClientSetup)]
     fn camera_entity(&self) -> Option<EntityRef>;
     /// Side: client.
+    /// Each column's height by `heightmap` in the world this window shows
+    /// (`LevelReader.getHeight(type, x, z)` on a client level): one above the highest block that
+    /// counts on that map, from the blocks the server has sent, none for a column whose chunk this
+    /// client does not hold. `Err`, reading nothing, for no client world (the title screen) or more
+    /// than 65,536 columns (`MAX_COLUMNS`).
+    #[access(WorldOnly)]
+    fn client_surface_heights(
+        &self,
+        columns: &[(i32, i32)],
+        heightmap: NativeHeightmap,
+    ) -> Result<Vec<Option<i32>>, String>;
+    /// Side: client.
     /// The ordinary block-or-entity pick (Minecraft.hitResult), using the
     /// game's targeting ray, reach and occlusion. None without a client world
     /// or on a miss. Entity hits carry this client level's epoch. Unlike

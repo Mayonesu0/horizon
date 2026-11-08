@@ -38,19 +38,32 @@ struct Host<'a> {
     creaking: Option<Arc<MobType>>,
     next_entity: &'a mut u32,
     spawning: bool,
+    /// The game's index of `mobs` by id: a heart asks for its creaking a
+    /// few times a tick.
+    index: std::cell::RefCell<super::mob_index::MobIndex>,
+}
+impl Host<'_> {
+    /// The slot of the live mob `id` in `mobs`, as a scan for the first
+    /// one with that id that is not removed (ids are unique in the list).
+    fn slot(&self, id: u32) -> Option<usize> {
+        self.index
+            .borrow_mut()
+            .find(self.mobs, id)
+            .filter(|&i| !self.mobs[i].removed)
+    }
 }
 impl HeartHost for Host<'_> {
     fn mob(&self, id: u32) -> Option<&Mob> {
-        self.mobs
-            .iter()
-            .chain(self.added.iter())
-            .find(|m| m.id == id && !m.removed)
+        match self.slot(id) {
+            Some(slot) => Some(&self.mobs[slot]),
+            None => self.added.iter().find(|m| m.id == id && !m.removed),
+        }
     }
     fn mob_mut(&mut self, id: u32) -> Option<&mut Mob> {
-        self.mobs
-            .iter_mut()
-            .chain(self.added.iter_mut())
-            .find(|m| m.id == id && !m.removed)
+        match self.slot(id) {
+            Some(slot) => Some(&mut self.mobs[slot]),
+            None => self.added.iter_mut().find(|m| m.id == id && !m.removed),
+        }
     }
     fn mob_for_uuid(&self, uuid: [i32; 4]) -> Option<u32> {
         self.uuids
@@ -94,8 +107,9 @@ impl Game<'_> {
     }
     /// Runs `f` on the heart at `key` with the game's mobs and level random,
     /// then applies what the heart reported. `others`: whether `f` reads the
-    /// other mobs through the mob world (without, it holds none: building them
-    /// costs a pass over every mob).
+    /// mob world, which is then built with the other mobs (`f` gets None
+    /// otherwise: the world reads every player, the teams and the weather, and
+    /// most heart ticks need none of it).
     fn with_heart(
         &mut self,
         key: Pos,
@@ -103,7 +117,7 @@ impl Game<'_> {
         others: bool,
         f: impl FnOnce(
             &mut CreakingHeart,
-            &horizon_client::mobs::MobWorld,
+            Option<&horizon_client::mobs::MobWorld>,
             &mut LegacyRandom,
             &mut Host,
             &mut Vec<HeartEvent>,
@@ -124,8 +138,9 @@ impl Game<'_> {
             Vec::new()
         };
         let mut events = Vec::new();
-        let added = {
-            let w = self.mob_world_base(&snapshot);
+        let index = std::cell::RefCell::new(std::mem::take(&mut self.mob_index));
+        let (added, index) = {
+            let w = others.then(|| self.mob_world_base(&snapshot));
             let mut host = Host {
                 mobs: &mut mobs,
                 added: Vec::new(),
@@ -133,10 +148,13 @@ impl Game<'_> {
                 creaking,
                 next_entity: &mut next_entity,
                 spawning,
+                index,
             };
-            f(heart, &w, &mut random, &mut host, &mut events);
-            host.added
+            f(heart, w.as_ref(), &mut random, &mut host, &mut events);
+            (host.added, host.index.into_inner())
         };
+        // The heart's additions go after every slot the index holds.
+        self.mob_index = index;
         mobs.extend(added);
         self.mobs
             .restore(mobs, horizon_client::join_seq::RestoreOrder::SurvivorsFirst);
@@ -181,7 +199,9 @@ impl Game<'_> {
             return;
         };
         let _ = self.with_heart(key, &mut heart, true, |h, w, lr, host, out| {
-            creaking_heart::creaking_hurt(h, home, w, lr, host, out);
+            if let Some(w) = w {
+                creaking_heart::creaking_hurt(h, home, w, lr, host, out);
+            }
         });
         self.world
             .block_entities
@@ -294,7 +314,12 @@ impl Game<'_> {
             let pos = [key.0, key.1, key.2];
             let others = creaking_heart::tick_updates(&heart);
             self.with_heart(key, &mut heart, others, |h, w, lr, host, out| {
-                creaking_heart::server_tick(h, pos, w, lr, host, out);
+                if creaking_heart::server_tick_start(h, pos, lr, host, out) {
+                    debug_assert!(w.is_some(), "tick_updates said no update");
+                    if let Some(w) = w {
+                        creaking_heart::server_tick_update(h, pos, w, lr, host, out);
+                    }
+                }
             })?;
         }
         self.world
@@ -502,12 +527,53 @@ mod nested_spawn_tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn lifted_heart_callback_keeps_nested_spawns_until_the_next_pass() {
-        crate::game::native_entity_refs::tests::with_game(|game| {
+        crate::game::entity::taken_pass_tests::in_both_dimensions(|game, balance| {
             let mut heart = CreakingHeart::default();
-            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(game, |game| {
-                game.with_heart((0, 80, 0), &mut heart, false, |_, _, _, _, _| {})
-                    .unwrap();
-            });
+            let kind = game.res.mob_types().get("minecraft:pig").unwrap().clone();
+            game.mobs
+                .push(Mob::new(70, kind, Vec3::new(0.5, 80.0, 0.5), 0.0));
+            game.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+            );
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            for others in [false, true] {
+                let at = [4 + i32::from(others), 80, 4];
+                crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(
+                    game,
+                    balance,
+                    |game| {
+                        game.with_heart(
+                            (0, 80, 0),
+                            &mut heart,
+                            others,
+                            |_, world, _, _, events| {
+                                assert_eq!(world.is_some(), others);
+                                assert_eq!(
+                                    world.map_or_else(Vec::new, |world| world
+                                        .others
+                                        .iter()
+                                        .map(|mob| mob.id)
+                                        .collect::<Vec<_>>()),
+                                    if others { vec![70] } else { vec![] }
+                                );
+                                events.push(HeartEvent::SetBlock(at, stone));
+                            },
+                        )
+                        .unwrap();
+                    },
+                );
+                assert_eq!(
+                    game.world.block(at[0], at[1], at[2]),
+                    stone,
+                    "heart event was not applied after restoring the pass"
+                );
+            }
         });
     }
 }

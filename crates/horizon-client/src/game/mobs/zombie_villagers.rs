@@ -271,6 +271,7 @@ fn carry_over(from: &Mob, to: &mut Mob) {
         let (effect, ticks, amplifier) = (effect.id, effect.duration, effect.amplifier);
         to.load_effect(effect, ticks, amplifier);
     }
+
     // VillagerData and the trades, experience and gossip.
     to.extra.variant = from.extra.variant;
     to.extra.profession = from.extra.profession.clone();

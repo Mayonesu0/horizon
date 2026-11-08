@@ -46,7 +46,7 @@ enum ContainerTarget<'a> {
 /// `HopperBlockEntity` transient state (`TransferCooldown`, `tickedGameTime`).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct HopperState {
-    cooldown: i32,
+    pub(super) cooldown: i32,
     ticked: i64,
 }
 impl Default for HopperState {
@@ -55,6 +55,38 @@ impl Default for HopperState {
             cooldown: -1,
             ticked: 0,
         }
+    }
+}
+
+impl HopperState {
+    /// `HopperBlockEntity.loadAdditional`: only the cooldown is saved; the
+    /// last tick time starts at zero for the new block entity.
+    pub(super) fn load(tag: &horizon_core::nbt::Tag) -> Self {
+        let canonical = horizon_client::block_entity_nbt::canonical(tag);
+        let cooldown = match canonical.as_ref().and_then(|t| t.get("TransferCooldown")) {
+            Some(horizon_core::nbt::Tag::Int(value)) => *value,
+            _ => -1,
+        };
+        Self {
+            cooldown,
+            ticked: 0,
+        }
+    }
+}
+
+impl Game<'_> {
+    pub(super) fn hopper_cooldown(&self, pos: Pos) -> i32 {
+        self.hoppers.get(&pos).map_or_else(
+            || {
+                self.world
+                    .chunks
+                    .get(&(pos.0 >> 4, pos.2 >> 4))
+                    .and_then(|c| c.saved.as_deref())
+                    .and_then(|s| s.block_entity_sources.iter().find(|(p, _)| *p == pos))
+                    .map_or(-1, |(_, tag)| HopperState::load(tag).cooldown)
+            },
+            |s| s.cooldown,
+        )
     }
 }
 
@@ -791,7 +823,7 @@ impl Game<'_> {
         let time = self.world.game_time;
         let waiting = {
             let state = self.hoppers.entry(pos).or_default();
-            state.cooldown -= 1;
+            state.cooldown = state.cooldown.wrapping_sub(1);
             state.ticked = time;
             state.cooldown > 0
         };

@@ -239,6 +239,17 @@ fn linked_lock_is_not_followed_even_when_its_target_is_inside_the_root() {
     assert_eq!(fs::read(kept).unwrap(), b"old compiler output");
 }
 
+#[cfg(windows)]
+#[test]
+fn pinned_root_cannot_be_renamed_away_on_windows() {
+    let home = Home::new();
+    let output = home.file("output");
+    let _plan = Plan::pin(&home.dir()).unwrap();
+    assert!(fs::rename(&home.0, home.0.with_extension("held")).is_err());
+    assert!(output.exists());
+}
+
+#[cfg(unix)]
 #[test]
 fn replacing_the_root_path_does_not_redirect_plan_or_trash() {
     let home = Home::new();

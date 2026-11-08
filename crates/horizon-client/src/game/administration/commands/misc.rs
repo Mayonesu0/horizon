@@ -148,6 +148,7 @@ impl Game<'_> {
                     return Err(err("commands.tick.sprint.stop.fail", &[]));
                 };
                 self.sprint_report(&report);
+                self.on_tick_rate_changed();
                 self.feedback(t("commands.tick.sprint.stop.success", &[]));
                 Ok(1)
             }
@@ -156,6 +157,7 @@ impl Game<'_> {
                 if freeze {
                     if let Some(report) = self.clock.stop_sprint() {
                         self.sprint_report(&report);
+                        self.on_tick_rate_changed();
                     }
                     self.clock.stop_step();
                 }
@@ -186,7 +188,8 @@ impl Game<'_> {
             }
         }
     }
-    /// The report `/tick sprint` prints when a sprint ends.
+    /// The report `/tick sprint` prints when a sprint ends. Each caller then
+    /// runs `on_tick_rate_changed`, as `ServerTickRateManager.finishTickSprint` does.
     pub(in crate::game) fn sprint_report(&mut self, report: &SprintReport) {
         self.feedback(Text::translate(
             "commands.tick.sprint.report",

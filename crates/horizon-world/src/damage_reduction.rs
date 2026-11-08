@@ -45,10 +45,15 @@ pub fn after_magic<W: DamageReductionWorld>(
         return Ok(MagicAbsorb {
             damage,
             mob_effects: 0.0,
+            resisted: false,
+            after_effects: damage,
+            protection: None,
         });
     }
     let mut mob_effects = 0.0;
+    let mut resisted_step = false;
     if world.has_resistance()? && !world.bypasses(Bypass::Resistance)? {
+        resisted_step = true;
         let reduction = world
             .resistance_amplifier()?
             .wrapping_add(1)
@@ -66,16 +71,23 @@ pub fn after_magic<W: DamageReductionWorld>(
             }
         }
     }
+    let after_effects = damage;
     if damage <= 0.0 {
         return Ok(MagicAbsorb {
             damage: 0.0,
             mob_effects,
+            resisted: resisted_step,
+            after_effects,
+            protection: None,
         });
     }
     if world.bypasses(Bypass::Enchantments)? {
         return Ok(MagicAbsorb {
             damage,
             mob_effects,
+            resisted: resisted_step,
+            after_effects,
+            protection: None,
         });
     }
     let protection = if let Some(level) = world.server_level()? {
@@ -89,5 +101,8 @@ pub fn after_magic<W: DamageReductionWorld>(
     Ok(MagicAbsorb {
         damage,
         mob_effects,
+        resisted: resisted_step,
+        after_effects,
+        protection: Some(protection),
     })
 }

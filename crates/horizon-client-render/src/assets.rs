@@ -382,6 +382,18 @@ impl RenderAssets {
         ] {
             sprites.insert(&format!("minecraft:block/{name}"))?;
         }
+        for model in crate::fluid_models::resolved() {
+            for name in [
+                Some(&model.still),
+                Some(&model.flowing),
+                model.overlay.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                sprites.insert(name)?;
+            }
+        }
         for stage in 0..10 {
             sprites.insert(&format!("minecraft:block/destroy_stage_{stage}"))?;
             sprites.insert(&format!("minecraft:block/destroy_oit_stage_{stage}"))?;

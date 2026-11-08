@@ -14,6 +14,9 @@ pub struct ModBlockEntity {
     pub(crate) id: String,
     pub(crate) fields: ModBlockEntityFields,
     pub(crate) revision: ModRevision,
+    /// What a callback asked for with `ModBlockEntityView::set_client_update_fields`, on its
+    /// way to the runtime's queue. The queue itself never reaches a snapshot.
+    pub(crate) client_update_fields: Option<Compound>,
 }
 /// What a `ModBlockEntity` can change: its saved compound without `id`,
 /// `x`, `y`, `z` and `Items`, its item slots
@@ -41,6 +44,7 @@ pub(crate) struct ModBlockEntitySnapshot {
     pub(crate) id: String,
     pub(crate) fields: ModBlockEntityFields,
     pub(crate) revision: ModRevision,
+    pub(crate) client_update_fields: Option<Compound>,
 }
 impl From<&ModBlockEntity> for ModBlockEntitySnapshot {
     fn from(entity: &ModBlockEntity) -> Self {
@@ -48,6 +52,7 @@ impl From<&ModBlockEntity> for ModBlockEntitySnapshot {
             id: entity.id.clone(),
             fields: entity.fields.clone(),
             revision: entity.revision,
+            client_update_fields: entity.client_update_fields.clone(),
         }
     }
 }
@@ -57,6 +62,7 @@ impl From<ModBlockEntitySnapshot> for ModBlockEntity {
             id: snapshot.id,
             fields: snapshot.fields,
             revision: snapshot.revision,
+            client_update_fields: snapshot.client_update_fields,
         }
     }
 }
@@ -66,6 +72,7 @@ impl ModBlockEntity {
         if self.fields != snapshot.fields {
             *std::ops::DerefMut::deref_mut(self) = snapshot.fields;
         }
+        self.client_update_fields = snapshot.client_update_fields;
     }
 }
 
@@ -96,7 +103,14 @@ impl ModBlockEntity {
             id,
             fields,
             revision,
+            client_update_fields: None,
         }
+    }
+
+    // hidden: the game moves what a callback asked for to the runtime's queue
+    #[doc(hidden)]
+    pub fn client_update_fields(&self) -> Option<&Compound> {
+        self.client_update_fields.as_ref()
     }
 
     pub fn new(id: String, fields: ModBlockEntityFields) -> Self {
@@ -107,6 +121,7 @@ impl ModBlockEntity {
                 born: horizon_mod_runtime::block_entities::new_identity(),
                 changes: 0,
             },
+            client_update_fields: None,
         }
     }
     /// The block entity's immutable type id (`mymod:machine`).
@@ -284,6 +299,25 @@ mod tests {
         assert_ne!(entity.revision(), revision);
         let restored = ModBlockEntity::from(ModBlockEntitySnapshot::from(&entity));
         assert_eq!(restored.revision(), entity.revision());
+    }
+
+    #[test]
+    fn client_update_fields_come_back_with_a_snapshot_and_change_nothing_else() {
+        let mut entity = ModBlockEntity::new("test:machine".into(), Default::default());
+        let revision = entity.revision();
+        let batch = Compound::from([("effect".into(), Tag::Int(23))]);
+        crate::ModBlockEntityView::new(&mut entity).set_client_update_fields(batch.clone());
+        assert_eq!(entity.revision(), revision);
+        assert_eq!(entity.clone().client_update_fields(), None);
+        let snapshot = ModBlockEntitySnapshot::from(&entity);
+        let mut returned = ModBlockEntity::from_snapshot(
+            entity.id().to_owned(),
+            ModBlockEntityFields::default(),
+            revision,
+        );
+        returned.apply_snapshot(snapshot);
+        assert_eq!(returned.client_update_fields(), Some(&batch));
+        assert_eq!(returned.revision(), revision);
     }
 
     #[test]

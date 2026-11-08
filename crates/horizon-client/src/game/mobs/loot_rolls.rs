@@ -107,6 +107,27 @@ impl Game<'_> {
             held,
             keep_empty,
         } = kill;
+        // LootCommand.dropKillLoot supplies the selected live mob as THIS_ENTITY.
+        let live_target = match target {
+            Target::Mob(id) => self
+                .mobs
+                .iter()
+                .find(|mob| mob.id == id)
+                .map(|mob| horizon_client::mobs::drops::loot_entity(mob, None)),
+            _ => None,
+        };
+        let loot = live_target.as_ref().and_then(|_| {
+            horizon_client::structure_blocks::loot_data(
+                &self.options.resources,
+                &self.pack_files(),
+                self.res.item_defaults(),
+            )
+        });
+        let matcher = |predicate: &serde_json::Value, entity: &horizon_world::loot::LootEntity| {
+            loot.as_ref()
+                .is_some_and(|data| data.entity_matches(predicate, Some(entity)))
+        };
+        let live_target = live_target.as_ref().filter(|_| loot.is_some());
         // The listeners get the game, so the roll holds its own share of the items.
         let listened = self
             .server_items
@@ -118,15 +139,35 @@ impl Game<'_> {
             return match sequence {
                 Some(id) => {
                     let random = self.rand_sequences.get(&id, self.level.seed);
-                    items.entity_drops_for_command(kind, by_player, held, random, keep_empty)
+                    if let Some(target) = live_target {
+                        items.entity_drops_with_target(
+                            kind, by_player, held, target, &matcher, random, keep_empty,
+                        )
+                    } else {
+                        items.entity_drops_for_command(kind, by_player, held, random, keep_empty)
+                    }
                 }
-                None => items.entity_drops_for_command(
-                    kind,
-                    by_player,
-                    held,
-                    &mut self.world.random,
-                    keep_empty,
-                ),
+                None => {
+                    if let Some(target) = live_target {
+                        items.entity_drops_with_target(
+                            kind,
+                            by_player,
+                            held,
+                            target,
+                            &matcher,
+                            &mut self.world.random,
+                            keep_empty,
+                        )
+                    } else {
+                        items.entity_drops_for_command(
+                            kind,
+                            by_player,
+                            held,
+                            &mut self.world.random,
+                            keep_empty,
+                        )
+                    }
+                }
             };
         };
         let epoch = entity.entity().epoch();
@@ -147,14 +188,26 @@ impl Game<'_> {
                 &mut rolls,
                 |r| r.sequences().get(&id, seed),
                 |random, ask| {
-                    items.entity_drops_asked(kind, by_player, held, random, ask, keep_empty)
+                    if let Some(target) = live_target {
+                        items.entity_drops_asked_with_target(
+                            kind, by_player, held, target, &matcher, random, ask, keep_empty,
+                        )
+                    } else {
+                        items.entity_drops_asked(kind, by_player, held, random, ask, keep_empty)
+                    }
                 },
             ),
             None => roll_asked(
                 &mut rolls,
                 |r| r.level_random(),
                 |random, ask| {
-                    items.entity_drops_asked(kind, by_player, held, random, ask, keep_empty)
+                    if let Some(target) = live_target {
+                        items.entity_drops_asked_with_target(
+                            kind, by_player, held, target, &matcher, random, ask, keep_empty,
+                        )
+                    } else {
+                        items.entity_drops_asked(kind, by_player, held, random, ask, keep_empty)
+                    }
                 },
             ),
         }

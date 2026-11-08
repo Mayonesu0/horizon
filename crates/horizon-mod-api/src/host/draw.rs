@@ -343,9 +343,11 @@ pub trait WorldDrawContext {
     ///
     /// One batch per model. The engine uploads only the instance records on the opaque
     /// and cutout route, and bakes the same prepared geometry on the CPU when a shader
-    /// pack, a copy with an [`Overlay`], or another route cannot take instances. A model
-    /// with a translucent face is refused with [`InstanceError::Translucent`] and is never
-    /// drawn as solid. Tint is `0xAARRGGBB` and light is [`LightCoords`]: both stay in
+    /// pack, a copy with an [`Overlay`], or another route cannot take instances. A
+    /// `shaders/` pack shades those copies as block entities, with the program that shades
+    /// [`BlockEntityDrawContext::model`]. A model with a translucent face is refused with
+    /// [`InstanceError::Translucent`] and is never drawn as solid.
+    /// Tint is `0xAARRGGBB` and light is [`LightCoords`]: both stay in
     /// vanilla's space, and the engine converts them to the frame. A tint's alpha
     /// multiplies only faces that have a tint index, the same as vanilla's model
     /// renderer. The view budget is 16,384 copies. Pass at most that many: a longer

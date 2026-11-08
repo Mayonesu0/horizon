@@ -11,6 +11,25 @@ use std::{
     sync::Arc,
 };
 
+fn copy_resource_bytes(
+    bytes: &[u8],
+    out: &mut impl io::Write,
+    budget: &std::sync::atomic::AtomicU64,
+) -> io::Result<()> {
+    use std::sync::atomic::Ordering;
+    let mut left = budget.load(Ordering::Relaxed);
+    loop {
+        let next = left.checked_sub(bytes.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::FileTooLarge, "pack exceeds unpack budget")
+        })?;
+        match budget.compare_exchange_weak(left, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(current) => left = current,
+        }
+    }
+    out.write_all(bytes)
+}
+
 enum Storage {
     Directory(PathBuf),
     Archive(Zip),
@@ -302,6 +321,39 @@ impl ResourceSource {
                 .get(name)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, name.to_owned()))?
                 .read(),
+        }
+    }
+    /// Copy a resource under a shared output budget, streaming archive entries.
+    pub fn copy_to(
+        &self,
+        name: &str,
+        out: &mut impl io::Write,
+        budget: &std::sync::atomic::AtomicU64,
+    ) -> io::Result<()> {
+        if !stays_inside(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsafe resource name",
+            ));
+        }
+        match self.0.as_ref() {
+            Storage::Archive(archive) => archive.copy_to(name, out, budget).map(|_| ()),
+            Storage::Prefix { source, prefix } => {
+                source.copy_to(&format!("{prefix}{name}"), out, budget)
+            }
+            Storage::Index(files) => match &files
+                .get(name)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, name.to_owned()))?
+                .0
+            {
+                ResourceStorage::File { source, name } => source.copy_to(name, out, budget),
+                ResourceStorage::Bytes(bytes) => copy_resource_bytes(bytes, out, budget),
+            },
+            Storage::Directory(root) => copy_resource_bytes(
+                &horizon_core::prepared_files::read(&root.join(name))?,
+                out,
+                budget,
+            ),
         }
     }
     pub fn read_to_string(&self, name: &str) -> io::Result<String> {

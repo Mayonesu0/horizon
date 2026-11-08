@@ -186,6 +186,11 @@ impl Game<'_> {
         self.pack.assets.registry.state(state)?;
         Some(self.res.facts().get(state).block_entity)
     }
+    /// `BlockState.getMapColor`: the state's `MapColor.id`, 0 for none. None for an unknown state.
+    pub(super) fn block_state_map_color(&self, state: BlockStateId) -> Option<u8> {
+        self.pack.assets.registry.state(state)?;
+        Some(self.res.facts().get(state).map_color)
+    }
     /// The states of `block` (`StateDefinition.getPossibleStates`), as the consecutive ids the
     /// registry numbers them with. None for an unknown block.
     pub(super) fn block_states_of(&self, block: BlockKey) -> Option<BlockStateRange> {
@@ -711,6 +716,9 @@ mod facts_tests {
             assert_eq!(facts.replaceable(stone), Some(false));
             assert_eq!(facts.has_block_entity(chest), Some(true));
             assert_eq!(facts.has_block_entity(stone), Some(false));
+            // MapColor.STONE is id 11 and air has none.
+            assert_eq!(facts.map_color(stone), Some(11));
+            assert_eq!(facts.map_color(air), Some(0));
             // SoundType.STONE: its break event, at volume and pitch 1.
             let sound = facts.sound(stone).unwrap();
             assert_eq!(&*sound.break_sound, "minecraft:block.stone.break");

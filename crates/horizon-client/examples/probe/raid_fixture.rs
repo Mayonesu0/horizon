@@ -11,14 +11,16 @@ use horizon_client::{
     mobs::{
         Species,
         data::MobData,
-        spawn_rules::{self, Dimension, SpawnLevel},
+        spawn_rules::{self, SpawnLevel},
         spawn_selection::{self, Heightmap},
         spawning::LocalDifficulty,
     },
     patrol::{self, GameplayAttributes, Member, PatrolLevel, PatrolSpawner},
     raid::{self, Action, BarName, RaidLevel, RaidPlayer, RaiderInfo, Raids},
 };
+use horizon_core::LevelKey;
 use horizon_core::random::{LegacyRandom, RandomSource};
+use horizon_world::dimension_type::DimensionFacts;
 use horizon_world::loot::PackOverlay;
 use std::{
     cell::RefCell,
@@ -77,7 +79,7 @@ struct World<'a> {
     light: i32,
     darken: i32,
     difficulty: i32,
-    dimension: Dimension,
+    dimension: &'static DimensionFacts,
     dimension_id: String,
     unloaded: HashSet<(i32, i32)>,
     no_ticking: HashSet<(i32, i32)>,
@@ -99,14 +101,14 @@ impl World<'_> {
             .map_or((self.sky, self.light), |(_, s, b)| (*s, *b))
     }
     fn min_y(&self) -> i32 {
-        if self.dimension == Dimension::Overworld {
+        if self.dimension.id == "minecraft:overworld" {
             -64
         } else {
             0
         }
     }
     fn max_y(&self) -> i32 {
-        if self.dimension == Dimension::Overworld {
+        if self.dimension.id == "minecraft:overworld" {
             319
         } else {
             255
@@ -178,7 +180,7 @@ impl SpawnLevel for World<'_> {
     fn peaceful(&self) -> bool {
         self.difficulty == 0
     }
-    fn dimension(&self) -> Dimension {
+    fn dimension_type(&self) -> &DimensionFacts {
         self.dimension
     }
     fn surface_slime_chance(&self, _: i32, _: i32, _: i32) -> f32 {
@@ -196,7 +198,7 @@ impl PatrolLevel for World<'_> {
         self.patrols
     }
     fn bright_outside(&self) -> bool {
-        self.dimension == Dimension::Overworld && self.darken < 4
+        self.dimension.id == "minecraft:overworld" && self.darken < 4
     }
     fn patrol_players(&self) -> Vec<([i32; 3], bool)> {
         self.player
@@ -555,11 +557,8 @@ pub fn main() -> horizon_client::Result<()> {
                 .unwrap_or_default()
         };
         let dimension_id = get("dim", "minecraft:overworld");
-        let dimension = match dimension_id.as_str() {
-            "minecraft:the_nether" => Dimension::Nether,
-            "minecraft:the_end" => Dimension::End,
-            _ => Dimension::Overworld,
-        };
+        let dimension =
+            DimensionFacts::of_builtin_level(LevelKey::builtin_or_overworld(&dimension_id));
         let player = c.get("p0").map(|p| {
             let mut parts = p.split('/');
             let v: Vec<f64> = parts

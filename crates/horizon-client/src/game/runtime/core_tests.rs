@@ -49,7 +49,8 @@ fn reload_resolves_parts_against_reloaded_tags() {
         let prepared = game
             .prepare_world_reload(&stack, &root, game.mods.data_switched)
             .unwrap();
-        game.reload_world_tables(prepared);
+        game.install_world_tables(prepared);
+        game.run_native_advancement_grants();
         assert_eq!(stone_key.id(game), name);
         assert_eq!(
             stone_key,
@@ -729,6 +730,7 @@ fn falling_block_does_not_descend_through_scaffolding() {
     let falling_y = 11.0;
     let buggy_descending_context = CollisionContext::for_entity(
         CollisionEntity {
+            kind: horizon_world::collision_context::EntityContextKind::Other,
             identity: EntityIdentity(0),
             y: falling_y,
             descending: true, // the old buggy behavior: wanted.y < 0.0
@@ -738,6 +740,7 @@ fn falling_block_does_not_descend_through_scaffolding() {
     );
     let fixed_context = CollisionContext::for_entity(
         CollisionEntity {
+            kind: horizon_world::collision_context::EntityContextKind::Other,
             identity: EntityIdentity(0),
             y: falling_y,
             descending: false, // fixed: FallingBlockEntity does not sneak

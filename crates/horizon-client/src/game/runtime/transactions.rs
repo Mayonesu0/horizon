@@ -41,6 +41,9 @@ pub(super) struct Level {
     players: HashMap<u128, KeptPlayer>,
     /// Each entity's inventory (`entity_slots`) before this transaction first wrote it.
     entities: HashMap<u32, Vec<Option<ItemStack>>>,
+    /// Each mob's or armor stand's equipment before this transaction first
+    /// wrote it (#932), told apart for the way back.
+    equipment: HashMap<u32, KeptEquipment>,
     /// Each chested mob's item list's length before `entity_slots` first grew it to its slots
     /// in this transaction.
     mob_lengths: HashMap<u32, usize>,
@@ -67,7 +70,7 @@ struct Kept {
     attachments: Option<Attachments>,
     hopper: Option<HopperState>,
     /// The custom name Horizon keeps beside the model (`World::block_names`).
-    name: Option<String>,
+    name: Option<horizon_core::nbt::Tag>,
     /// The container lock and loot table roll kept beside the model.
     extras: BlockEntityExtras,
 }
@@ -98,6 +101,14 @@ struct KeptPlayer {
     carried: Option<ItemStack>,
 }
 
+/// A mob's or an armor stand's equipment as a transaction first wrote it
+/// (#932): the same eight slots, restored their own way.
+#[derive(Clone)]
+enum KeptEquipment {
+    Mob(Vec<Option<ItemStack>>),
+    Stand(Vec<Option<ItemStack>>),
+}
+
 #[derive(Clone)]
 struct KeptMenus {
     ender_items: Vec<Option<ItemStack>>,
@@ -123,6 +134,15 @@ pub(super) enum After {
     Spawn([f64; 3], ItemStack),
     /// The item entity with this id was emptied: removed, unless it holds items again.
     Emptied(u32),
+    /// `LivingEntity.onEquipItem`'s sound and equip/unequip game event, at the entity `who`
+    /// is: what an equipment write through a transaction tells the world only at the root
+    /// commit, so an abort stays quiet (#932).
+    Equip {
+        at: [f64; 3],
+        sound: Option<String>,
+        equips: bool,
+        who: u32,
+    },
 }
 
 /// Effects shared by transactional interaction contexts.
@@ -191,6 +211,9 @@ impl Game<'_> {
                 }
                 for (id, kept) in level.entities {
                     outer.entities.entry(id).or_insert(kept);
+                }
+                for (id, kept) in level.equipment {
+                    outer.equipment.entry(id).or_insert(kept);
                 }
                 for (id, kept) in level.item_entities {
                     outer.item_entities.entry(id).or_insert(kept);
@@ -310,6 +333,24 @@ impl Game<'_> {
             level.entities.entry(id).or_insert(slots);
         }
     }
+    /// Keeps mob `id`'s equipment as it is, if a transaction is open and hasn't yet (#932):
+    /// an abort puts every slot back and makes the attribute map over again.
+    pub(super) fn journal_equipment(&mut self, id: u32) {
+        let Some(level) = self.transactions.last_mut() else {
+            return;
+        };
+        if level.equipment.contains_key(&id) {
+            return;
+        }
+        let kept = if let Some(mob) = self.mobs.iter().find(|m| m.id == id && !m.removed) {
+            KeptEquipment::Mob(mob.equipment_stacks().iter().cloned().collect())
+        } else if let Some(stand) = self.armor_stands.iter().find(|a| a.id == id) {
+            KeptEquipment::Stand(stand.equipment.iter().cloned().collect())
+        } else {
+            return;
+        };
+        level.equipment.insert(id, kept);
+    }
     /// Sets item entity `id`'s stack, keeping it as it was if a transaction is open and hasn't
     /// yet. Emptied in one, it stays, empty, until the root commit removes it, so an abort can
     /// put its stack back. False where no such item entity is.
@@ -405,6 +446,17 @@ impl Game<'_> {
                     self.remove_dropped(i);
                 }
             }
+            After::Equip {
+                at,
+                sound,
+                equips,
+                who,
+            } => {
+                // `equip_item_effects` rebuilt from the entity it names: the
+                // sculk context reads the mob as it is at the root commit.
+                let ctx = self.who_context(Some(horizon_client::mobs::Who::Mob(who)), None);
+                self.equip_item_effects(at, sound, equips, ctx);
+            }
         }
     }
     fn root_commit(&mut self, level: Level) {
@@ -458,7 +510,34 @@ impl Game<'_> {
             }
         }
     }
-    fn roll_back(&mut self, level: Level) {
+    fn roll_back(&mut self, mut level: Level) {
+        // Each mob's equipment goes back as it was, and the attribute map is
+        // made over it again (#932).
+        let equipment = std::mem::take(&mut level.equipment);
+        for (id, kept) in equipment {
+            match kept {
+                KeptEquipment::Mob(stacks) => {
+                    let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) else {
+                        continue;
+                    };
+                    for (slot, stack) in stacks.into_iter().enumerate() {
+                        mob.set_equipment_stack(slot, stack);
+                    }
+                    self.collect_mob_equipment_attributes(id);
+                }
+                // An armor stand keeps no live attribute map of its gear; the
+                // plain write puts its slots back as they were.
+                KeptEquipment::Stand(stacks) => {
+                    let Some(stand) = self.armor_stands.iter_mut().find(|a| a.id == id) else {
+                        continue;
+                    };
+                    for (slot, stack) in stacks.into_iter().enumerate() {
+                        stand.equipment.set(slot, stack);
+                    }
+                }
+            }
+        }
+
         for (pos, kept) in level.block_entities {
             if let (Some(entity), Some(now)) =
                 (kept.entity, self.world.block_entities.get_mut(&pos))

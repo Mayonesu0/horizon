@@ -8,8 +8,9 @@ use crate::BlockEntityTypeDecl;
 use crate::ticket_controller::{self, ControllerInfo};
 use crate::{
     BlockEntityPart, BlockPart, BlockSide, BlockStateId, Capability, CapabilityKey,
-    EntityCapabilityKey, EntityPart, EntityRef, HOOK_COUNT, HookId, Host, ItemCapabilityKey,
-    ItemPart, ItemPlace, MenuPart, ModEntry, PlaceProvider, ServerHost, TicketController,
+    EntityCapabilityKey, EntityPart, EntityRef, FluidPart, HOOK_COUNT, HookId, Host,
+    ItemCapabilityKey, ItemPart, ItemPlace, MenuPart, ModEntry, PlaceProvider, ServerHost,
+    TicketController,
 };
 use std::{
     any::{Any, type_name},

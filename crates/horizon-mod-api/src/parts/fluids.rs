@@ -1,4 +1,25 @@
 use super::*;
+/// The world fluids the mods declared in code, once they have all registered.
+pub fn declared_world_fluids() -> &'static [horizon_mod_package::content::FluidLook] {
+    installed().map_or(&[], |installed| &installed.world_fluids)
+}
+
+impl HookParts {
+    pub(crate) fn fluid<'k>(
+        &self,
+        id: impl FnOnce() -> Option<&'k str>,
+    ) -> &[Attached<dyn FluidPart>] {
+        attached(&self.fluids, id)
+    }
+}
+
+impl dyn Registrar + '_ {
+    /// Attach `part` to the world fluid `fluid`, a mod's, by the id it was declared with.
+    pub fn fluid_part<P: FluidPart>(&mut self, fluid: &str, part: P) {
+        self.attach_fluid_part(fluid, type_name::<P>(), Arc::new(part));
+    }
+}
+
 pub(crate) fn resolved_fluids() -> &'static OnceLock<horizon_mod_runtime::registry_keys::Names> {
     static EMPTY: OnceLock<horizon_mod_runtime::registry_keys::Names> = OnceLock::new();
     installed().map_or(&EMPTY, |installed| &installed.fluids)
@@ -14,6 +35,40 @@ pub mod tests {
     use super::*;
     use crate::parts::tests::*;
     use crate::*;
+
+    #[test]
+    fn world_fluid_declarations_refuse_generated_names() {
+        for (first, second) in [("oil", "flowing_oil"), ("flowing_oil", "oil")] {
+            let mut registrar = super::PartRegistrar::new("maker");
+            let options = crate::WorldFluid {
+                tick_delay: 20,
+                drop_off: 2,
+                slope_find_distance: 3,
+                source_conversion: true,
+                bucket: false,
+            };
+            assert_ne!(
+                registrar.declare_world_fluid(first, options),
+                crate::FluidKey(u32::MAX)
+            );
+            assert_eq!(
+                registrar.declare_world_fluid(second, options),
+                crate::FluidKey(u32::MAX)
+            );
+            assert_eq!(registrar.world_fluids.len(), 1);
+            let world = registrar.world_fluids[0].world.unwrap();
+            assert_eq!(
+                (
+                    world.tick_delay,
+                    world.drop_off,
+                    world.slope_find_distance,
+                    world.source_conversion,
+                    world.bucket
+                ),
+                (20, 2, 3, true, false)
+            );
+        }
+    }
 
     #[test]
     pub(crate) fn invalid_and_duplicate_fluid_declarations_are_refused() {
@@ -519,6 +574,14 @@ pub trait FluidsRegistrar {
 
     /// Declare a tank-only fluid in this mod's namespace and return its key.
     fn declare_fluid(&mut self, path: &str) -> crate::FluidKey;
+
+    /// Declare a fluid in this mod's namespace that exists in the world (NeoForge's
+    /// `RegisterEvent` for a `FluidType`), with its block and, as `fluid` says, its bucket. Its
+    /// `data/<mod id>/horizon/fluid/<path>.json`, if any, says how it looks.
+    fn declare_world_fluid(&mut self, path: &str, fluid: crate::WorldFluid) -> crate::FluidKey;
+
+    /// Attach `part`, of kind `kind`, to the world fluid `fluid`.
+    fn attach_fluid_part(&mut self, fluid: &str, kind: &'static str, part: Arc<dyn FluidPart>);
 }
 
 impl FluidsRegistrar for PartRegistrar {
@@ -558,5 +621,55 @@ impl FluidsRegistrar for PartRegistrar {
             ));
         }
         self.fluid_key(&id)
+    }
+
+    fn declare_world_fluid(&mut self, path: &str, fluid: crate::WorldFluid) -> crate::FluidKey {
+        let fluid = horizon_mod_package::content::WorldFluid {
+            tick_delay: fluid.tick_delay,
+            drop_off: fluid.drop_off,
+            slope_find_distance: fluid.slope_find_distance,
+            source_conversion: fluid.source_conversion,
+            bucket: fluid.bucket,
+        };
+        let id = format!("{}:{path}", self.mod_id);
+        let flowing = format!("{}:flowing_{path}", self.mod_id);
+        if [id.as_str(), flowing.as_str()].iter().any(|id| {
+            self.registry_keys
+                .borrow()
+                .declared_fluids
+                .contains_key(*id)
+        }) {
+            self.refused
+                .push(format!("world fluid {id}: name declared twice"));
+            return crate::FluidKey(u32::MAX);
+        }
+        if let Err(error) = fluid.check() {
+            self.refused.push(format!(
+                "mod {}: world fluid {path:?}: {error}",
+                self.mod_id
+            ));
+            return crate::FluidKey(u32::MAX);
+        }
+        let key = self.declare_fluid(path);
+        if key != crate::FluidKey(u32::MAX) {
+            let look = horizon_mod_package::content::FluidLook {
+                id: format!("{}:{path}", self.mod_id),
+                sprite: None,
+                tint: None,
+                world: Some(fluid),
+            };
+            let flowing = look.flowing_id();
+            self.registry_keys
+                .borrow_mut()
+                .declared_fluids
+                .insert(flowing.clone(), self.mod_id);
+            self.fluid_key(&flowing);
+            self.world_fluids.push(look);
+        }
+        key
+    }
+
+    fn attach_fluid_part(&mut self, fluid: &str, kind: &'static str, part: Arc<dyn FluidPart>) {
+        self.attach(|p| &mut p.fluids, kind, fluid, part);
     }
 }

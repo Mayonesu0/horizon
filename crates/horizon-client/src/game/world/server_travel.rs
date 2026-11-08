@@ -327,7 +327,7 @@ impl Game<'_> {
                         });
                         return true;
                     }
-                    self.start_server_trip(conn, plan.dim, Some(plan));
+                    self.start_server_trip(conn, plan.dim, Some(plan), false);
                 }
             }
             "end_portal" => {
@@ -335,7 +335,7 @@ impl Game<'_> {
                 // Entity.canTeleport: out of the End only after the credits.
                 if !from_end || seen_credits {
                     let target = if from_end { Dim::Overworld } else { Dim::End };
-                    self.start_server_trip(conn, target, None);
+                    self.start_server_trip(conn, target, None, false);
                 }
             }
             _ => self.start_gateway_trip(conn, pos),
@@ -384,9 +384,13 @@ impl Game<'_> {
             g.vehicle.is_some(),
         );
         // Entity.checkInsideBlocks: the Nether portal blocks the box is in.
-        // `canUsePortal(false)` is false for a passenger: its vehicle goes
-        // through and carries it (`carry_riders_through_portals`).
-        if !riding && let Some(pos) = self.nether_portal_inside(at) {
+        // `LivingEntity.canUsePortal` (#943): not a passenger — its vehicle
+        // goes through and carries it (`carry_riders_through_portals`) — and
+        // not asleep.
+        if !riding
+            && !sleeping
+            && let Some(pos) = self.nether_portal_inside(at)
+        {
             self.portals.player.set_inside(pos, PLAYER_DELAY);
         }
         // `ServerPlayer.showEndCredits`: the player stays out of the world while the
@@ -416,7 +420,7 @@ impl Game<'_> {
                     let (uuid, name) = (g.uuid, g.name.clone());
                     self.native_player_clone(uuid, &name, false);
                 }
-                self.start_server_trip(conn, Dim::Overworld, None);
+                self.start_server_trip(conn, Dim::Overworld, None, true);
                 self.portals.player.cooldown = 10;
             }
             return;
@@ -452,7 +456,7 @@ impl Game<'_> {
                 if !self.server_player_portal_allowed(conn, target, "end_portal") {
                     return;
                 }
-                self.start_server_trip(conn, target, None);
+                self.start_server_trip(conn, target, None, false);
             }
             // Entity.setAsInsidePortal while cooling down restarts the cooldown.
             self.portals.player.cooldown = 10;
@@ -511,7 +515,7 @@ impl Game<'_> {
             self.portals.player.process = None;
             return;
         }
-        self.start_server_trip(conn, plan.dim, Some(plan));
+        self.start_server_trip(conn, plan.dim, Some(plan), false);
     }
 
     /// `Entity.handlePortal` of a vehicle server players ride, once through
@@ -550,7 +554,7 @@ impl Game<'_> {
             // point out of the End).
             let (target, plan) = (plan.dim, (!plan.end).then_some(plan));
             for conn in riders {
-                self.start_server_trip(conn, target, plan);
+                self.start_server_trip(conn, target, plan, false);
             }
         }
     }
@@ -575,7 +579,13 @@ impl Game<'_> {
     /// The player moves to `target`'s level (opened if nobody was there)
     /// and is told it is there, at the approximate exit, while it loads. The
     /// level whose tick is running is put back in place afterwards.
-    pub(super) fn start_server_trip(&mut self, conn: u32, target: Dim, plan: Option<Plan>) {
+    pub(super) fn start_server_trip(
+        &mut self,
+        conn: u32,
+        target: Dim,
+        plan: Option<Plan>,
+        credits_respawn: bool,
+    ) {
         let Some(host) = self.lan.as_mut() else {
             return;
         };
@@ -633,6 +643,12 @@ impl Game<'_> {
         if let Some(host) = self.lan.as_mut() {
             host.hub
                 .change_level(i, at, yaw, None, true, PLAYER_DELAY, &ctx);
+        }
+        if credits_respawn && let Some(host) = self.lan.as_mut() {
+            host.hub.guests.update(i, |g| {
+                g.load_timeout = horizon_client::lan::guest::CLIENT_LOADED_TIMEOUT;
+                g.loading = true;
+            });
         }
         self.bind_player_attachments(conn, false);
         self.as_guest(conn, |g| {
@@ -1454,5 +1470,130 @@ mod transfer_lifetime_tests {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod credits_respawn_tests {
+    use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
+    use horizon_client::lan::{Joined, NetConfig, PlayerSender, guest::Guest, hub::HubConfig};
+    use horizon_protocol::packets::configuration::ClientInformation;
+    use std::sync::{Arc, atomic::AtomicI32, mpsc};
+
+    /// `ServerGamePacketListenerImpl.handleClientCommand(PERFORM_RESPAWN)` for a
+    /// player who won the game: `restartClientLoadTimerAfterRespawn`, so the
+    /// respawned player is not loaded (its actions wait, `isInvulnerableTo`
+    /// spares it) until the client says so or 60 ticks pass.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn the_credits_respawn_waits_for_the_client_to_load() {
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            horizon_assets::resource_source::ResourceRoot::directory(root.clone()),
+            Vec::new(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            crate::game::execution_role::ExecutionRole::IntegratedServer,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&horizon_assets::resource_source::ResourceSource::directory(
+                root.clone(),
+            )),
+            None,
+        )
+        .unwrap();
+        let scratch = std::env::temp_dir().join(format!(
+            "horizon-credits-respawn-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        game.world_root = scratch.clone();
+        game.level.world_spawn = Some([0, 100, 0]);
+        game.lan_host(
+            super::super::lan::LanSettings {
+                port: 0,
+                guest_commands: true,
+                force_game_mode: false,
+            },
+            NetConfig {
+                announce: false,
+                ..NetConfig::loopback(0, "credits-respawn-test".into(), 2)
+            },
+            HubConfig {
+                default_game_mode: 0,
+                guest_commands: true,
+                force_game_mode: false,
+                hardcore: false,
+                view_distance: 2,
+                simulation_distance: 2,
+                dimension: "minecraft:overworld".into(),
+                allow_flight: false,
+                seed: 0,
+                max_players: 2,
+                integrated: false,
+                levels: Default::default(),
+            },
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut guest = Guest::new(
+            Joined {
+                conn: 2,
+                uuid: 330,
+                name: "CreditsGuest".into(),
+                properties: Vec::new(),
+                info: ClientInformation::new(2),
+                brand: "test".into(),
+                sender: PlayerSender::new(tx, Arc::default()),
+                latency: Arc::new(AtomicI32::new(0)),
+                address: "127.0.0.1:25565".parse().unwrap(),
+                expected: false,
+            },
+            2,
+            [0.5, 100.0, 0.5],
+            2,
+        );
+        guest.dimension = "minecraft:overworld".into();
+        guest.placed = true;
+        guest.loaded = true;
+        guest.loading = false;
+        guest.load_timeout = 0;
+        let mut host = game.lan.take().unwrap();
+        host.hub.guests.push(guest);
+        let play = host.play.entry(2).or_default();
+        play.won_game = true;
+        play.respawn_requested = true;
+        assert!(host.hub.guests[0].client_loaded());
+
+        game.lan = Some(host);
+        game.handle_server_portal(2);
+        let host = game.lan.take().unwrap();
+        assert!(!host.play[&2].won_game, "the credits are over");
+        let guest = &host.hub.guests[0];
+        assert_eq!(guest.load_timeout, 60);
+        assert!(guest.loading);
+        assert!(!guest.client_loaded());
+        drop(host);
+        drop(game);
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 }

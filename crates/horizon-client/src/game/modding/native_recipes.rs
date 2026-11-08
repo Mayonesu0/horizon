@@ -340,12 +340,7 @@ impl Game<'_> {
                         index.any(base),
                         addition.as_ref().map(|i| index.any(i)).unwrap_or_default(),
                     ],
-                    result
-                        .item
-                        .as_deref()
-                        .and_then(|item| index.stack(item, result.count, String::new()))
-                        .into_iter()
-                        .collect(),
+                    index.of(&result.create()).into_iter().collect(),
                 ),
                 Smithing::Trim {
                     id,

@@ -59,8 +59,16 @@ impl Root {
             Err(error) => return Err(error.into()),
         };
         checked(root, true)?;
-        if root.exists() && root.canonicalize()? != root {
-            return Err(Error::Unsafe(root.to_owned()));
+        if root.exists() {
+            // Windows canonical paths gain a `\\?\` prefix and long names, so compare ancestors' reparse points instead.
+            #[cfg(windows)]
+            for ancestor in root.ancestors().filter(|path| path.parent().is_some()) {
+                checked(ancestor, true)?;
+            }
+            #[cfg(not(windows))]
+            if root.canonicalize()? != root {
+                return Err(Error::Unsafe(root.to_owned()));
+            }
         }
         Ok(Self {
             path: root.to_owned(),

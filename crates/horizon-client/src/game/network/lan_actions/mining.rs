@@ -143,20 +143,17 @@ impl Game<'_> {
         Ok(self.world.block(pos[0], pos[1], pos[2]) != before)
     }
 
-    /// The crack animation other players see.
+    /// ServerPlayerGameMode.incrementDestroyProgress, including the first hit.
     pub(super) fn guest_dig_feedback(&mut self, conn: u32) {
         let Some(host) = self.lan.as_mut() else {
             return;
         };
-        let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
+        let Some(play) = host.play.get_mut(&conn) else {
             return;
         };
-        let play = host.play.entry(conn).or_default();
         let Some((pos, _)) = play.digging else {
             return;
         };
-        // ServerPlayerGameMode.tick: a block gone while it is dug (the guest's own tick broke
-        // it, or something else did) clears the crack.
         if play.last_progress >= 0
             && self
                 .res
@@ -167,36 +164,22 @@ impl Game<'_> {
             self.guest_crack_gone(conn, pos);
             return;
         }
-        let progress = play
-            .mining
-            .as_ref()
-            .map_or(-1, |m| (m.progress.clamp(0.0, 1.0) * 10.0) as i32 - 1);
-        let swinging = play.swing.swinging();
+        let Some(mining) = play.mining.as_ref() else {
+            return;
+        };
+        let progress =
+            (mining.per_tick * (host.hub.ticks - play.dig_start + 1) as f32 * 10.0) as i32;
         if progress != play.last_progress && progress >= 0 {
             play.last_progress = progress;
-            let guest = &host.hub.guests[gi];
-            let id = guest.entity_id;
             if mod_api::__private::listened(mod_api::HookId::BlockBreakProgressUpdate) {
+                let Some(guest) = host.hub.guest(conn) else {
+                    return;
+                };
                 let (uuid, name) = (guest.uuid, guest.name.clone());
                 self.native_block_break_progress_update(uuid, &name, pos, progress);
             }
-            // The host player sees it too (on the server thread its window is a guest).
-            self.destroy_block_progress(id, pos, progress);
-            let Some(host) = self.lan.as_ref() else {
-                return;
-            };
-            host.hub.broadcast_near(
-                [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])],
-                64.0,
-                &C::BlockDestruction(play::BlockDestruction {
-                    id,
-                    pos,
-                    progress: progress as u8,
-                }),
-                Some(conn),
-            );
+            self.guest_crack_progress(conn, pos, progress);
         }
-        let _ = swinging;
     }
 
     /// `level.destroyBlockProgress(id, pos, -1)` for a guest: its crack on `pos` is gone, for the
@@ -221,6 +204,10 @@ impl Game<'_> {
         }
     }
     pub(super) fn guest_crack_gone(&mut self, conn: u32, pos: [i32; 3]) {
+        self.guest_crack_progress(conn, pos, -1);
+    }
+    /// Only other players strictly within 32 blocks receive crack updates.
+    pub(super) fn guest_crack_progress(&mut self, conn: u32, pos: [i32; 3], progress: i32) {
         let Some(id) = self
             .lan
             .as_ref()
@@ -229,17 +216,17 @@ impl Game<'_> {
         else {
             return;
         };
-        self.destroy_block_progress(id, pos, -1);
+        self.destroy_block_progress(id, pos, progress);
         let Some(host) = self.lan.as_ref() else {
             return;
         };
         host.hub.broadcast_near(
             [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])],
-            64.0,
+            32.0,
             &C::BlockDestruction(play::BlockDestruction {
                 id,
                 pos,
-                progress: 255,
+                progress: progress as u8,
             }),
             Some(conn),
         );

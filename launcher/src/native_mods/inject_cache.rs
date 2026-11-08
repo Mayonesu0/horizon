@@ -34,13 +34,9 @@ pub(super) fn key(
     for bundle in mods {
         field(&mut hash, b"bundle");
         field(&mut hash, bundle.manifest.id.as_bytes());
-        // Trait-only edits do not change the patched source. A raw source helper may
-        // include other crate files, so hash that crate conservatively when one is used.
-        let reads_source = bundle
-            .native()
-            .injection
-            .iter()
-            .any(|entry| entry.helper.is_some());
+        // API-only edits do not change patched source. Supporting modules may
+        // include other crate files, so hash their source conservatively.
+        let reads_source = !bundle.native().module.is_empty();
         for (name, path) in super::bundle_files(bundle)? {
             if !reads_source
                 && (name == "Cargo.toml" || name == "build.rs" || name.starts_with("src/"))

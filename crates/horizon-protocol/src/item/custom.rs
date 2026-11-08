@@ -62,15 +62,7 @@ pub fn validate(value: &horizon_core::nbt::Tag) -> crate::Result<()> {
     if matches!(value, horizon_core::nbt::Tag::End) {
         return Err(crate::Error::new("a component value cannot be NBT End"));
     }
-    let bytes = horizon_core::nbt::write_network(
-        value,
-        horizon_core::nbt::Limits {
-            max_bytes: crate::buf::NBT_QUOTA,
-            ..Default::default()
-        },
-    )
-    .map_err(|error| crate::Error::new(error.to_string()))?;
-    Reader::new(&bytes).nbt()?;
+    crate::buf::check_network_nbt(value)?;
     // Disk NBT canonicalizes NaNs, and its reader normalizes negative zero.
     // Reject values that would change when saved and reloaded.
     let limits = horizon_core::nbt::Limits {

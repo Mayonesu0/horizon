@@ -1,0 +1,36 @@
+name: launcher-windows-check
+# The launcher's tests on Windows x64, for pull requests that change it. Nothing is built for release or published:
+# the release workflow (launcher.yml) stays off. GitHub-hosted, so it needs no runner of ours.
+on:
+  pull_request:
+    paths:
+      - 'launcher/**'
+      - '.github/workflows/launcher-windows-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-windows-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: launcher
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher
+          shared-key: launcher-windows-check
+      # Every test target (the library, the binary, tests/), as launcher.yml runs them.
+      - run: cargo test --release --locked

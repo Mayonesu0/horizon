@@ -1,7 +1,7 @@
 //! Moved here from the game so mods can name it.
 #[allow(unused_imports)]
 use crate::*;
-pub use horizon_world::living_damage::{DamageContainer, Reduction};
+pub use horizon_world::living_damage::{DamageContainer, Reduction, ReductionChange};
 /// A hit's `DamageSource` for `HURT_SERVER`: its type (`minecraft:fall`),
 /// the entity ids of `getEntity` (`causing`) and `getDirectEntity`
 /// (`direct`), 0 for none or not known, and where it comes from

@@ -183,6 +183,7 @@ impl TreeBlocks {
                     FluidKind::Water => *flag |= WATER_SOURCE | WATER_FLUID | ANY_FLUID,
                     FluidKind::FlowingWater => *flag |= WATER_FLUID | ANY_FLUID,
                     FluidKind::Lava | FluidKind::FlowingLava => *flag |= LAVA_FLUID | ANY_FLUID,
+                    FluidKind::Mod(_) | FluidKind::ModFlowing(_) => *flag |= ANY_FLUID,
                     FluidKind::Empty => {}
                 }
                 if fluid.is_source() {
@@ -408,6 +409,10 @@ impl PosSet {
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+    /// Iteration order of the native set without materializing a position list.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = [i32; 3]> + '_ {
+        self.0.entries().map(|(key, _)| key.0)
     }
     /// Iteration order of the native set.
     pub(crate) fn to_vec(&self) -> Vec<[i32; 3]> {

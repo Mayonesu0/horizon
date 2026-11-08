@@ -290,16 +290,20 @@ pub(super) struct RunnerOptions {
     clear_between_batches: bool,
     grid_for_existing: bool,
     grid: Option<Grid>,
+    /// `trackAndStartRunner`'s source is the command's own, not the
+    /// server's (`TestInstanceBlockEntity.runTest`).
+    from_command: bool,
 }
 
 impl RunnerOptions {
-    pub(super) fn new(halt_on_error: bool, grid: Option<Grid>) -> Self {
+    pub(super) fn new(halt_on_error: bool, grid: Option<Grid>, from_command: bool) -> Self {
         Self {
             halt_on_error,
             batch_size: 50,
             clear_between_batches: false,
             grid_for_existing: false,
             grid,
+            from_command,
         }
     }
 
@@ -312,6 +316,7 @@ impl RunnerOptions {
             clear_between_batches: true,
             grid_for_existing: true,
             grid: Some(grid),
+            from_command: true,
         }
     }
 }
@@ -501,6 +506,9 @@ pub(super) struct GameTests {
     /// `FailedTestTracker.LAST_FAILED_TESTS`.
     pub(super) failed: Vec<String>,
     outbox: Vec<Out>,
+    /// The command that starts the runner is still running: its source takes
+    /// `TestBatchSummaryDisplayer`'s lines then and there.
+    command_start: bool,
     /// `GameTestRunner.currentEnvironment`.
     environment: Option<Activation>,
 }
@@ -548,9 +556,13 @@ impl Game<'_> {
         infos: Vec<Info>,
         halt_on_error: bool,
         grid: Option<Grid>,
+        from_command: bool,
     ) {
         let batches = batch_infos(infos, 50);
-        self.track_and_start_batches(batches, RunnerOptions::new(halt_on_error, grid));
+        self.track_and_start_batches(
+            batches,
+            RunnerOptions::new(halt_on_error, grid, from_command),
+        );
     }
 
     /// `TestCommand.trackAndStartRunner` for batches already made.
@@ -580,7 +592,10 @@ impl Game<'_> {
             scheduled: Vec::new(),
             stopped: false,
         });
+        // GameTestRunner.start runs the first batch inside the command.
+        self.game_tests.command_start = options.from_command;
         self.run_batch(0);
+        self.game_tests.command_start = false;
     }
 
     /// `GameTestRunner.runBatch`.
@@ -658,13 +673,20 @@ impl Game<'_> {
             }
             None => log::error!("Missing test environment {environment}"),
         }
-        self.game_tests.outbox.push(Out::Console {
-            text: Text::translate(
-                "commands.test.batch.starting",
-                &[Text::literal(environment), number(batch_number)],
-            ),
-            broadcast: true,
-        });
+        // TestBatchSummaryDisplayer.testBatchStarting: `sendSuccess(.., true)`
+        // to the source that started the runner.
+        let starting = Text::translate(
+            "commands.test.batch.starting",
+            &[Text::literal(environment), number(batch_number)],
+        );
+        if self.game_tests.command_start {
+            self.feedback(starting);
+        } else {
+            self.game_tests.outbox.push(Out::Console {
+                text: starting,
+                broadcast: true,
+            });
+        }
         if let Some(runner) = self.game_tests.runner.as_mut() {
             runner.batch_pending = spawned.len();
             runner.last_batch = spawned.iter().map(|i| (i.dim, i.pos)).collect();

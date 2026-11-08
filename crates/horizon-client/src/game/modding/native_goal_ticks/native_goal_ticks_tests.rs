@@ -999,3 +999,52 @@ fn mod_goal_tick_cost() {
         );
     });
 }
+
+/// Registers the zombie's mod goal and listens to `finalize_spawn` without
+/// changing anything.
+struct GoalsAndFinalize;
+#[mod_api::__subscriptions]
+impl Hooks for GoalsAndFinalize {
+    fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
+        r.entity_part("minecraft:zombie", ZombieGoals);
+    }
+    fn finalize_spawn(
+        &self,
+        _: &dyn mod_api::Host,
+        _: &mut mod_api::FinalizeSpawnEvent<'_>,
+    ) -> mod_api::Flow {
+        mod_api::Flow::Continue
+    }
+}
+
+/// A `finalize_spawn` listener lends the mob for its call: the mod goal
+/// attached when the mob was made (`part_goals::attach`, whose copies carry
+/// no goal and name themselves `ModGoal`) is still the mob's own afterwards.
+#[test]
+#[ignore = "needs prepared resources"]
+fn a_finalize_spawn_listener_keeps_the_mod_goals() {
+    with_game(|game| {
+        let entries = vec![ModEntry::new("finalize-goals", Box::new(GoalsAndFinalize))];
+        mod_api::__private::install(entries.into());
+        crate::game::api_values::install_parts(&[ModEntry::new(
+            "finalize-goals",
+            Box::new(GoalsAndFinalize),
+        )])
+        .unwrap();
+        game.resolve_parts().unwrap();
+        let kind = game
+            .res
+            .mob_types()
+            .get("minecraft:zombie")
+            .unwrap()
+            .clone();
+        let mut m = Mob::new(60, kind, Vec3::new(3.5, 65.0, 3.5), 0.0);
+        m.on_ground = true;
+        let reason = horizon_client::mobs::spawn_rules::Reason::Natural;
+        game.finalize_with(&mut m, reason, None);
+        assert!(
+            m.ai.goals.entries().any(|(_, name, _)| name == "Counter"),
+            "the mod goal survives the lend"
+        );
+    });
+}

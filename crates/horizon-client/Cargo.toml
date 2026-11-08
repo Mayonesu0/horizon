@@ -149,6 +149,10 @@ path = "src/main.rs"
 name = "native_gui_overlay_probe"
 path = "examples/native_gui_overlay_probe.rs"
 
+[[example]]
+name = "native_waypoints"
+path = "examples/native_waypoints.rs"
+
 [[test]]
 name = "datapack_biome_sync"
 path = "tests/datapack_biome_sync.rs"

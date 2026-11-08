@@ -50,6 +50,10 @@ pub struct ParticleOptions {
     pub mod_particle: Option<String>,
     /// Pre-1.20.5 entity-effect providers use spawn velocity as RGB; true is ambient.
     pub legacy_entity_effect: Option<bool>,
+    /// A pre-1.21.4 server's trail, which had no duration: TrailParticle.Provider chose
+    /// `nextInt(40) + 10` after constructing the particle. Set by the client for an older
+    /// server only, never read from the wire.
+    pub legacy_trail_lifetime: bool,
 }
 impl ParticleOptions {
     pub fn simple(ty: ParticleType) -> Self {
@@ -65,6 +69,7 @@ impl ParticleOptions {
             vibration: None,
             mod_particle: None,
             legacy_entity_effect: None,
+            legacy_trail_lifetime: false,
         }
     }
     /// A native mod's `SimpleParticleType`: the sprite set of

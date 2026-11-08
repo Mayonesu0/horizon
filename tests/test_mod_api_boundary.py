@@ -89,6 +89,20 @@ class ModApiBoundaryTests(unittest.TestCase):
                     unexplained.append(f"{path.relative_to(ROOT)}:{i + 1}: {item}")
         self.assertEqual(unexplained, [], "move the item into `__private`, or add `// hidden: <why>`")
 
+    def test_world_fluid_registration_uses_api_owned_values(self):
+        source = (API / "parts/fluids.rs").read_text()
+        registrar = source.split("pub trait FluidsRegistrar {", 1)[1].split("\n}", 1)[0]
+        # The generator consumes the trait signature as the mod-facing contract.
+        self.assertNotIn("horizon_mod_package::", registrar)
+        self.assertRegex(api_text(), r"pub struct WorldFluid\b")
+
+    def test_fluid_model_collection_uses_api_owned_values(self):
+        source = (ROOT / "crates/horizon-client/src/game/native_hooks/register_fluid_models.rs").read_text()
+        signature = source.split("fn native_register_fluid_models(", 1)[1].split(") {", 1)[0]
+        # Collected hook fields are generated directly from this signature.
+        self.assertNotIn("horizon_mod_package::", signature)
+        self.assertRegex(api_text(), r"pub struct FluidModel\b")
+
     def test_surfaces_stay_in_area_fragments(self):
         for name in ["lib.rs", "__private.rs"]:
             source = (API / name).read_text()

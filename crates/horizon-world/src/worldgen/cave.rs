@@ -235,6 +235,20 @@ const DUNGEON_MOBS: [&str; 4] = [
     "minecraft:zombie",
     "minecraft:spider",
 ];
+/// Initial data for a fresh dungeon spawner, preserving the generation
+/// sink's fields and insertion order. The entity was already selected.
+pub(crate) fn dungeon_spawner_nbt(entity: &str) -> horizon_core::nbt::Compound {
+    use horizon_core::nbt::Tag;
+    let mut mob = horizon_core::nbt::Compound::new();
+    mob.insert("id".into(), Tag::String(entity.into()));
+    let mut data = horizon_core::nbt::Compound::new();
+    data.insert("entity".into(), Tag::Compound(mob));
+    let mut nbt = horizon_core::nbt::Compound::new();
+    nbt.insert("id".into(), Tag::String("minecraft:mob_spawner".into()));
+    nbt.insert("SpawnData".into(), Tag::Compound(data));
+    nbt.insert("SpawnPotentials".into(), Tag::List(Vec::new()));
+    nbt
+}
 #[derive(Clone, Debug)]
 pub struct MonsterRoomFeature {
     blocks: Arc<TreeBlocks>,
@@ -696,5 +710,38 @@ impl GeodeFeature {
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod dungeon_spawner_data_tests {
+    use super::*;
+    #[test]
+    fn extracted_generation_builder_preserves_exact_payload_and_order() {
+        use horizon_core::nbt::{Limits, Tag, write_network};
+        for entity in [
+            "minecraft:skeleton",
+            "minecraft:zombie",
+            "minecraft:spider",
+            "example:bound_entity",
+        ] {
+            let expected = {
+                let mut mob = horizon_core::nbt::Compound::new();
+                mob.insert("id".into(), Tag::String(entity.into()));
+                let mut data = horizon_core::nbt::Compound::new();
+                data.insert("entity".into(), Tag::Compound(mob));
+                let mut nbt = horizon_core::nbt::Compound::new();
+                nbt.insert("id".into(), Tag::String("minecraft:mob_spawner".into()));
+                nbt.insert("SpawnData".into(), Tag::Compound(data));
+                nbt.insert("SpawnPotentials".into(), Tag::List(Vec::new()));
+
+                nbt
+            };
+            let actual = dungeon_spawner_nbt(entity);
+            assert_eq!(
+                write_network(&Tag::Compound(actual), Limits::default()).unwrap(),
+                write_network(&Tag::Compound(expected), Limits::default()).unwrap()
+            );
+        }
     }
 }

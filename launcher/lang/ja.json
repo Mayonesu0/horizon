@@ -257,8 +257,6 @@
   "Game internals must be declared: run cargo horizon-mod internals sync in the mod's folder, then build again.": "Game internals must be declared: run cargo horizon-mod internals sync in the mod's folder, then build again.",
   "E_INTERNAL_PATH: {path} cannot be re-exported as a declared internal; declare its types or free functions instead.": "E_INTERNAL_PATH: {path} cannot be re-exported as a declared internal; declare its types or free functions instead.",
   "E_NOT_RAW: {mod}: {target} has no raw form: it is generic or takes impl Trait.": "E_NOT_RAW: {mod}: {target} has no raw form: it is generic or takes impl Trait.",
-  "E_NOT_SITE: {mod}: add `{line}` to crates/horizon-mod-api-gen/slots/{mod}.txt and rebuild the game; this call is not a compiled-in site.": "E_NOT_SITE: {mod}: add `{line}` to crates/horizon-mod-api-gen/slots/{mod}.txt and rebuild the game; this call is not a compiled-in site.",
-  "E_SITE_KIND: {mod}: injection {injection}: WRAP_WITH_CONDITION requires a unit-returning call.": "E_SITE_KIND: {mod}: injection {injection}: WRAP_WITH_CONDITION requires a unit-returning call.",
   "Easy": "イージー",
   "Edit instance": "Edit instance",
   "Edit {name}": "{name} を編集",
@@ -1207,5 +1205,10 @@
   "Can use the prebuilt game if one exists for your Horizon and it serves every enabled mod.": "Can use the prebuilt game if one exists for your Horizon and it serves every enabled mod.",
   "Native mods aren't sandboxed: they run with full access to your computer, like any program. Install only mods whose authors you trust. To play with one, build the game on the Mods page; a build may download Rust and other build tools.": "Native mods aren't sandboxed: they run with full access to your computer, like any program. Install only mods whose authors you trust. To play with one, build the game on the Mods page; a build may download Rust and other build tools.",
   "Native builds may download Rust and other build tools. Source builds compile the game on this computer.": "Native builds may download Rust and other build tools. Source builds compile the game on this computer.",
-  "{build} built and selected for its instance.": "{build} built and selected for its instance."
+  "{build} built and selected for its instance.": "{build} built and selected for its instance.",
+  "Found on this computer": "このコンピューターで見つかったもの",
+  "Your system keyring didn't answer within {seconds} seconds. Make sure it is running and unlocked, then restart the launcher.": "システムのキーリングが{seconds}秒以内に応答しませんでした。動作中でロックが解除されていることを確認してから、ランチャーを再起動してください。",
+  "Can't read {name}'s sign-in: {why}": "{name}のサインイン情報を読み取れません: {why}",
+  "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.": "Horizon はデータパックの関数、関数タグ、条件、アイテム修飾、レシピ、ルートテーブル、進捗、村人の取引、ダメージ種別、ほとんどのタグ、ワールド生成の大部分（バイオーム、地物、構造物、ディメンション）を実行します。ワールドプリセットなど、その他のファイルはまだ読み込みません。",
+  "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.": "{title} は今のところ Horizon に何も変えません。Horizon はその {files} をまだ読み込みません。"
 }

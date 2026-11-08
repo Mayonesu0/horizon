@@ -68,6 +68,29 @@ mob's finalization; carrying it on to the pack's next member comes with that thr
 
 See [the hook notes](../reference/hook-notes.md#finalize-spawn) for what each spawn site covers and what is left out (breeding, loads, worldgen structure mobs).
 
+## Changing how large a spawn group grows
+
+A natural spawn adds mobs of one type to a group until the group reaches the type's limit (`Mob.getMaxSpawnClusterSize`: 4 by default, more for horses, wolves and schooling fish, 1 for ghasts and pillagers). The entity part of the type changes that limit with `EntityPart::spawn_cluster_size`, which gets the read-only host, the mob just spawned, why and from what it spawned, and the limit vanilla would use. Return `Some(limit)` to replace it, or `None` to leave it to the next part and then to vanilla. The first part to answer wins, and the group stops growing once its size reaches the limit.
+
+```rust,ignore
+struct ZombiePacks;
+#[mod_api::horizon_part]
+impl mod_api::EntityPart for ZombiePacks {
+    fn spawn_cluster_size(
+        &self,
+        _: &dyn mod_api::Host,
+        _: mod_api::UnspawnedMobRef,
+        _: mod_api::NativeSpawnReason,
+        _: Option<mod_api::NativeSpawner>,
+        vanilla: u32,
+    ) -> Option<u32> {
+        Some(vanilla * 2)
+    }
+}
+```
+
+Only natural spawning's packs ask it: vanilla has no group limit anywhere else. A type with no part keeps vanilla's limit and costs nothing. The mob is the same `UnspawnedMobRef` as `finalize_spawn`'s, finalized and not yet in a level, and the call runs on replayed ticks like `finalize_spawn`, so an answer must be a pure function of its inputs. Attach the part with `r.entity_part("minecraft:zombie", ZombiePacks)` as [entity parts](../concepts/trait-mods/023-entity-parts-and-mob-goals.md) describe.
+
 ## Keeping or removing a mob
 
 `mob_despawn` fires once per tick for every mob in a loaded chunk, just before vanilla's `Mob.checkDespawn`, persistent mobs and mobs in peaceful mode included. `Allow` discards the mob, `Deny` keeps it, `Default` leaves vanilla's rules to decide. An answer other than `Default` skips all of vanilla's checks, so a `Deny` keeps a hostile mob in peaceful mode and neither answer takes the idle-despawn `nextInt(800)` draw.

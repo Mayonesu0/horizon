@@ -392,8 +392,13 @@ impl<B: TerrainBlockStates> PlacementContext for TerrainRegion<'_, B> {
         fluid: FluidKind,
         delay: i32,
     ) -> Result<(), PlacementQueryError> {
-        self.request_tick(TickKind::Fluid, position, TickTypeId(fluid as u32), delay)
-            .map_err(Into::into)
+        self.request_tick(
+            TickKind::Fluid,
+            position,
+            TickTypeId(fluid.tick_id()),
+            delay,
+        )
+        .map_err(Into::into)
     }
 
     fn sea_level(&mut self) -> Result<i32, PlacementQueryError> {

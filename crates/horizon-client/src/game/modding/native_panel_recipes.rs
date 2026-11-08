@@ -290,6 +290,8 @@ impl Shown {
 /// page is set.
 #[derive(Clone, Debug)]
 struct Well {
+    /// The fluid the well shows, for its tooltip.
+    stack: mod_api::FluidStack,
     /// The fluid's atlas sprite; none draws a flat square of the tint.
     sprite: Option<String>,
     tint: u32,
@@ -306,11 +308,12 @@ impl Well {
         let tint = fluid_tint(&id, look.as_ref().and_then(|l| l.tint));
         let amount = format!("{} mB", fluid.amount);
         let name = if fluid.key().is_some() {
-            fluid_name(&id)
+            horizon_client::fluid_tooltip::fluid_name(&id)
         } else {
             horizon_client::lang::get("horizon.fluid.unknown")
         };
         Self {
+            stack: fluid.clone(),
             sprite: look.and_then(|l| l.sprite),
             tint,
             label: format!("{name} {amount}"),
@@ -328,16 +331,6 @@ pub(super) fn fluid_tint(fluid: &str, look: Option<u32>) -> u32 {
     })
 }
 
-/// NeoForge's `FluidType` description id is `fluid_type.<namespace>.<path>`; vanilla's own
-/// fluids are named by their block, `block.<namespace>.<path>`.
-pub(super) fn fluid_name(fluid: &str) -> String {
-    let (ns, path) = fluid.split_once(':').unwrap_or(("minecraft", fluid));
-    horizon_client::lang::get_or(
-        &format!("fluid_type.{ns}.{path}"),
-        &horizon_client::lang::get_or(&format!("block.{ns}.{path}"), &prettified(path)),
-    )
-}
-
 /// A chance as the panel writes it: a whole percent as "25%", else "12.5%".
 fn chance_text(chance: f32) -> String {
     if (chance - chance.round()).abs() < 0.05 {
@@ -345,18 +338,6 @@ fn chance_text(chance: f32) -> String {
     } else {
         format!("{chance:.1}%")
     }
-}
-
-/// `formic_acid` as "Formic Acid", for a fluid its lang doesn't name.
-fn prettified(path: &str) -> String {
-    path.split('_')
-        .map(|w| {
-            w.chars().next().map_or(String::new(), |c| {
-                c.to_uppercase().chain(w.chars().skip(1)).collect()
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// The tabs' places, in rows under the title row.
@@ -438,6 +419,21 @@ impl Game<'_> {
             let (sent, stack) = pages.tabs.get(i)?;
             Some((i, sent.clone(), stack.clone()?))
         })
+    }
+    /// The fluid in the well under the pointer.
+    pub(super) fn recipe_fluid_hovered(&self, layout: &Layout) -> Option<mod_api::FluidStack> {
+        let pages = self.panel.recipes.as_ref()?;
+        self.recipes_shown(layout)
+            .into_iter()
+            .find_map(|(i, (x, y))| {
+                let r = pages.recipes.get(i)?;
+                let (wells_in, wells_out, _) = r.fluid_places(layout.width());
+                [(wells_in, &r.fluid_inputs), (wells_out, &r.fluid_outputs)]
+                    .into_iter()
+                    .flat_map(|(places, wells)| places.into_iter().zip(wells))
+                    .find(|&((sx, sy), _)| inside(self.cursor, [x + sx, y + sy, SLOT, SLOT]))
+                    .map(|(_, well)| well.stack.clone())
+            })
     }
     /// The recipe slot under the pointer: recipe, slot, and its stack now.
     pub(super) fn recipe_slot_hovered(
@@ -827,14 +823,12 @@ impl Game<'_> {
 mod tests {
     use super::*;
 
-    /// Water and lava keep vanilla's colours, a look's tint wins, anything else is grey, and a
-    /// fluid the lang doesn't name is its path in words.
+    /// Water and lava keep vanilla's colours, a look's tint wins, anything else is grey.
     #[test]
-    fn a_fluid_has_a_colour_and_a_name() {
+    fn a_fluid_has_a_colour() {
         assert_eq!(fluid_tint("minecraft:water", None), 0xFF3F76E4);
         assert_eq!(fluid_tint("minecraft:water", Some(0xFF112233)), 0xFF112233);
         assert_eq!(fluid_tint("mymod:oil", None), 0xFF9A9A9A);
-        assert_eq!(fluid_name("mymod:formic_acid"), "Formic Acid");
     }
 
     /// The results sit in a row after the arrow, numbered after the inputs.
@@ -1019,6 +1013,5 @@ mod tests {
     fn chance_and_fluid_names_read_well() {
         assert_eq!(chance_text(25.0), "25%");
         assert_eq!(chance_text(12.5), "12.5%");
-        assert_eq!(prettified("formic_acid"), "Formic Acid");
     }
 }

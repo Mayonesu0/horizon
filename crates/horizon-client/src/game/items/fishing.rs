@@ -13,7 +13,7 @@ use horizon_client::{
     mesher::Vertex,
     particles::{ParticleOptions, ParticleType},
     pose::Pose,
-    sound_engine::unique_seed,
+    random_source,
 };
 use horizon_core::{
     geometry::{Aabb, Vec3, traverse_blocks, trig},
@@ -23,10 +23,15 @@ use horizon_core::{
 use horizon_protocol::entity_data::{Value, serializer};
 use std::sync::Arc;
 
+/// The table a catch rolls where no mod's fishing medium names one.
+const FISHING_TABLE: &str = "minecraft:gameplay/fishing";
+
 /// `FishingHook.retrieve`: the table's named random sequence, or the level
 /// random when a datapack table does not name one.
+#[allow(clippy::too_many_arguments)]
 fn fishing_loot(
     loot: &horizon_world::loot::LootData,
+    table: &str,
     sequences: &mut horizon_client::random_sequences::RandomSequences,
     level_random: &mut LegacyRandom,
     world_seed: i64,
@@ -34,7 +39,6 @@ fn fishing_loot(
     biome: Option<&str>,
     open_water: bool,
 ) -> Vec<horizon_world::loot::LootStack> {
-    let table = "minecraft:gameplay/fishing";
     match loot.random_sequence(table) {
         Some(sequence) => loot.roll(
             table,
@@ -78,9 +82,38 @@ pub(super) struct Hook {
     open_water: bool,
     luck: i32,
     lure: i32,
+    /// The fishing medium it last floated in outside water (`native_fishing_medium`): the
+    /// table its catch rolls and the wait it draws. None in water.
+    medium: Option<HookMedium>,
     /// The position a server's update put it heading for.
     lerp: HookLerp,
     pub(super) random: LegacyRandom,
+}
+/// What a hook keeps of the mod's fishing medium it floats in.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct HookMedium {
+    loot_table: Option<String>,
+    lure_ticks: Option<(i32, i32)>,
+}
+/// The medium a mod answered, when the hook is in it: in the block of its
+/// surface or below, as a hook is in water anywhere in a water block.
+fn inside_medium(
+    position: Vec3,
+    medium: Option<super::native_hooks::NativeFishingMedium>,
+) -> Option<super::native_hooks::NativeFishingMedium> {
+    medium.filter(|m| m.surface.is_finite() && position.y < m.surface.floor() + 1.0)
+}
+/// `catchingFish`'s wait for a fish: vanilla's 100 to 600 ticks, or a medium's
+/// own range, less the rod's Lure.
+fn lure_wait(random: &mut LegacyRandom, range: Option<(i32, i32)>, lure: i32) -> i32 {
+    match range {
+        None => 100 + random.next_int_bound(501).unwrap_or(0) - lure,
+        Some((min, max)) => {
+            let min = min.max(1);
+            let max = max.max(min);
+            min + random.next_int_bound(max - min + 1).unwrap_or(0) - lure
+        }
+    }
 }
 /// A player a hook can catch (`canHitEntity`): their entity id, which
 /// guest they are (none: the host) and their box.
@@ -368,7 +401,7 @@ impl Game<'_> {
             let mut state = (Vec3::new(x, 301.1, z), motion, State::Flying, false);
             let mut random = LegacyRandom::new(0);
             for tick in 0..5 {
-                state = self.client_hook_step(state, &mut random);
+                state = self.client_hook_step(1, None, state, &mut random);
                 rows.push(serde_json::json!({
                     "case": case, "tick": tick,
                     "position": [state.0.x - f64::from(block[0]), state.0.y, state.0.z - f64::from(block[2])],
@@ -450,7 +483,8 @@ impl Game<'_> {
                 eye_y,
                 p.position.z - f64::from(y_cos) * 0.3,
             );
-            let mut random = LegacyRandom::new(unique_seed());
+            // The hook's own random (`Entity.random`).
+            let mut random = random_source::entity();
             let v = cast_velocity(y_sin, y_cos, dir_y, &mut random);
             self.next_entity += 1;
             self.hook = Some(Hook {
@@ -472,6 +506,7 @@ impl Game<'_> {
                 open_water: true,
                 luck,
                 lure,
+                medium: None,
                 lerp: HookLerp::default(),
                 random,
             });
@@ -563,8 +598,14 @@ impl Game<'_> {
             // explicit random source. LootContext uses the table's sequence,
             // or the level random if the table has no sequence.
             let luck = hook.luck as f32 + owner_luck;
+            let table = hook
+                .medium
+                .as_ref()
+                .and_then(|m| m.loot_table.as_deref())
+                .unwrap_or(FISHING_TABLE);
             let items = fishing_loot(
                 &loot,
+                table,
                 &mut self.rand_sequences,
                 &mut self.world.random,
                 self.level.seed,
@@ -669,11 +710,7 @@ impl Game<'_> {
     pub(super) fn biome_name_at(&self, p: Vec3) -> Option<String> {
         let (x, y, z) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
         let c = self.world.chunks.get(&(x >> 4, z >> 4))?;
-        Some(
-            world_biomes!(self).list[c.biome(x, y, z) as usize]
-                .name
-                .clone(),
-        )
+        Some(world_biomes!(self).name(c.biome(x, y, z)).to_owned())
     }
     fn water_height(&self, x: i32, y: i32, z: i32) -> Option<(f32, bool)> {
         let f = self.res.facts().get(self.world.block(x, y, z));
@@ -840,7 +877,8 @@ impl Game<'_> {
                 h.time_until_hooked = 20 + h.random.next_int_bound(61).unwrap_or(0);
             }
         } else {
-            h.time_until_lured = 100 + h.random.next_int_bound(501).unwrap_or(0) - h.lure;
+            let range = h.medium.as_ref().and_then(|m| m.lure_ticks);
+            h.time_until_lured = lure_wait(&mut h.random, range, h.lure);
         }
     }
     /// `catchingFish`'s check below a fish: the block under it is water.
@@ -913,7 +951,23 @@ impl Game<'_> {
             h.position.z.floor() as i32,
         ];
         let liquid = self.water_height(b[0], b[1], b[2]).map_or(0.0, |w| w.0);
-        let in_water = liquid > 0.0;
+        // Out of water, a mod may say the bobber floats here all the same.
+        let medium = if liquid > 0.0 || matches!(h.state, State::Hooked(_)) {
+            None
+        } else {
+            self.hook_medium(h.id, h.position, Some(owner))
+        };
+        match &medium {
+            Some(m) => {
+                h.medium = Some(HookMedium {
+                    loot_table: m.loot_table.clone(),
+                    lure_ticks: m.lure_ticks,
+                })
+            }
+            None if liquid > 0.0 => h.medium = None,
+            None => {}
+        }
+        let in_water = liquid > 0.0 || medium.is_some();
         match h.state {
             State::Flying => {
                 if in_water {
@@ -1065,7 +1119,10 @@ impl Game<'_> {
             }
             State::Bobbing => {
                 let v = h.velocity;
-                let mut force = h.position.y + v.y - f64::from(b[1]) - f64::from(liquid);
+                let mut force = match &medium {
+                    Some(m) => h.position.y + v.y - m.surface,
+                    None => h.position.y + v.y - f64::from(b[1]) - f64::from(liquid),
+                };
                 if force.abs() < 0.01 {
                     force += force.signum() * 0.1;
                 }
@@ -1074,8 +1131,10 @@ impl Game<'_> {
                 if h.nibble <= 0 && h.time_until_hooked <= 0 {
                     h.open_water = true;
                 } else {
-                    h.open_water =
-                        h.open_water && h.out_of_water < 10 && self.calculate_open_water(b);
+                    // A medium has no water around it to be open: it counts as open.
+                    h.open_water = h.open_water
+                        && h.out_of_water < 10
+                        && (medium.is_some() || self.calculate_open_water(b));
                 }
                 if in_water {
                     h.out_of_water = (h.out_of_water - 1).max(0);
@@ -1391,6 +1450,7 @@ impl Game<'_> {
             "lured_in": h.time_until_lured,
             "hooked_in": h.time_until_hooked,
             "open_water": h.open_water,
+            "loot_table": h.medium.as_ref().and_then(|m| m.loot_table.clone()),
         }))
     }
 }
@@ -1518,8 +1578,9 @@ impl Hook {
             open_water: true,
             luck: 0,
             lure: 0,
+            medium: None,
             lerp: HookLerp::default(),
-            random: LegacyRandom::new(unique_seed()),
+            random: random_source::entity(),
         }
     }
     /// `FishingHook`'s entity for the players tracking it: the owner's id in
@@ -1577,7 +1638,7 @@ impl Game<'_> {
                 state: State::Flying,
                 on_ground: false,
                 lerp: HookLerp::default(),
-                random: LegacyRandom::new(unique_seed()),
+                random: random_source::entity(),
             });
         }
     }
@@ -1652,7 +1713,10 @@ impl Game<'_> {
             h.previous = h.position;
             h.position = h.lerp.step(h.position);
             let before = h.position;
+            let owner = self.player.as_ref().map(|p| p.position);
             (h.position, h.velocity, h.state, h.on_ground) = self.client_hook_step(
+                h.id,
+                owner,
                 (h.position, h.velocity, h.state, h.on_ground),
                 &mut h.random,
             );
@@ -1664,7 +1728,14 @@ impl Game<'_> {
             h.previous = h.position;
             h.position = h.lerp.step(h.position);
             let before = h.position;
+            let owner = self
+                .mobs
+                .iter()
+                .find(|m| m.id == h.owner)
+                .map(|m| m.position);
             (h.position, h.velocity, h.state, h.on_ground) = self.client_hook_step(
+                h.id,
+                owner,
                 (h.position, h.velocity, h.state, h.on_ground),
                 &mut h.random,
             );
@@ -1673,6 +1744,25 @@ impl Game<'_> {
         self.remote_hooks = hooks;
     }
 
+    /// The fishing medium a mod says the hook at `position` floats in
+    /// (`native_fishing_medium`), when it is in it. API @API:fishing_medium@.
+    fn hook_medium(
+        &mut self,
+        id: u32,
+        position: Vec3,
+        owner: Option<Vec3>,
+    ) -> Option<super::native_hooks::NativeFishingMedium> {
+        let mut medium = None;
+        let dimension = self.dim.id();
+        self.native_fishing_medium(
+            dimension,
+            id,
+            [position.x, position.y, position.z],
+            owner.map(|o| [o.x, o.y, o.z]),
+            &mut medium,
+        );
+        inside_medium(position, medium)
+    }
     /// `FishingHook.checkCollision` clips blocks on both sides of the connection.
     fn hook_block_hit(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
         let mut scene = SceneCollisions {
@@ -1699,6 +1789,8 @@ impl Game<'_> {
     /// server's): position, motion, state and whether it rests on the ground.
     fn client_hook_step(
         &mut self,
+        id: u32,
+        owner: Option<Vec3>,
         (mut position, mut velocity, state, mut on_ground): (Vec3, Vec3, State, bool),
         random: &mut impl RandomSource,
     ) -> (Vec3, Vec3, State, bool) {
@@ -1708,7 +1800,13 @@ impl Game<'_> {
             position.z.floor() as i32,
         ];
         let liquid = self.water_height(b[0], b[1], b[2]).map_or(0.0, |w| w.0);
-        let in_water = liquid > 0.0;
+        // The same fishing medium the server's hook floats in, so it is drawn floating too.
+        let medium = if liquid > 0.0 || matches!(state, State::Hooked(_)) {
+            None
+        } else {
+            self.hook_medium(id, position, owner)
+        };
+        let in_water = liquid > 0.0 || medium.is_some();
         match state {
             State::Flying if in_water => {
                 velocity = Vec3::new(velocity.x * 0.3, velocity.y * 0.2, velocity.z * 0.3);
@@ -1763,7 +1861,10 @@ impl Game<'_> {
                 };
             }
             State::Bobbing => {
-                let mut force = position.y + velocity.y - f64::from(b[1]) - f64::from(liquid);
+                let mut force = match &medium {
+                    Some(m) => position.y + velocity.y - m.surface,
+                    None => position.y + velocity.y - f64::from(b[1]) - f64::from(liquid),
+                };
                 if force.abs() < 0.01 {
                     force += force.signum() * 0.1;
                 }
@@ -1882,6 +1983,7 @@ mod tests {
             let mut level_random = LegacyRandom::new(1);
             let items = super::fishing_loot(
                 &loot,
+                super::FISHING_TABLE,
                 &mut sequences,
                 &mut level_random,
                 seed,

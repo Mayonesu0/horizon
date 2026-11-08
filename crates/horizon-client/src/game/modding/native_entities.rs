@@ -46,6 +46,7 @@ pub(super) fn target_id(t: Target) -> Option<u32> {
         | Target::Crystal(id)
         | Target::Dragon(id)
         | Target::Tnt(id)
+        | Target::Cushion(id)
         | Target::Falling(id)
         | Target::Rocket(id)
         | Target::Trident(id)
@@ -772,6 +773,9 @@ mod tests {
                     velocity: Vec3::ZERO,
                     fuse: 80,
                     on_ground: false,
+                    in_water: false,
+                    stuck: Vec3::ZERO,
+                    fall_distance: 0.0,
                     owner: None,
                     guest: None,
                     no_gravity: false,

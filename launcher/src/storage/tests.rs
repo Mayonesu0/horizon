@@ -11,7 +11,8 @@ impl Home {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        Self(path)
+        // Canonical, as Storage::at stores it: Windows temp paths are 8.3 short names.
+        Self(path.canonicalize().unwrap())
     }
     pub(super) fn seed(&self, path: &str) -> PathBuf {
         let path = self.0.join(path);
@@ -167,6 +168,17 @@ fn child_cargo_locks_prevent_clear_and_survive_idle_cleanup() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn held_root_cannot_be_renamed_away_on_windows() {
+    let home = Home::new();
+    let precious = home.seed("native/source/world");
+    let _storage = Storage::at(&home.0).unwrap();
+    assert!(fs::rename(&home.0, home.0.with_extension("held")).is_err());
+    assert!(precious.exists());
+}
+
+#[cfg(unix)]
 #[test]
 fn same_path_with_different_root_identity_is_refused() {
     let home = Home::new();

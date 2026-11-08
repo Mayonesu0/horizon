@@ -1,5 +1,4 @@
 //! Raw function declarations and the staged point catalog.
-use horizon_mod_package::manifest::InjectionKind;
 use std::{fs, path::Path};
 
 /// One raw function declaration and its head or return target.
@@ -41,28 +40,6 @@ impl ListedPoint {
 /// The `points.json` the game's build script writes, beside the prebuilt game or in the
 /// staged game's build output.
 pub(super) const POINTS: &str = "points.json";
-
-pub(super) fn raw_of(
-    listed: &[ListedPoint],
-    manifest: &horizon_mod_package::Manifest,
-) -> Vec<PointInjection> {
-    manifest
-        .native
-        .iter()
-        .flat_map(|native| &native.injection)
-        .filter(|injection| injection.selector.is_none())
-        .filter_map(|injection| {
-            Some(PointInjection {
-                mod_id: manifest.id.clone(),
-                id: injection.id.clone(),
-                target: injection.target.clone()?,
-                method: injection.raw.clone()?,
-                at_return: matches!(injection.kind, InjectionKind::Return),
-            })
-        })
-        .chain(super::slots::points(listed, manifest))
-        .collect()
-}
 
 #[derive(serde::Deserialize)]
 pub(super) struct Catalog {
@@ -178,6 +155,34 @@ mod tests {
         fs::write(root.join("src/lib.rs"), "fn changed() {}\n").unwrap();
         assert_eq!(before, key());
         assert_ne!(built, installed());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn module_source_edits_invalidate_the_patch_key() {
+        let (root, _) = fixture("module-cache", "");
+        let path = root.join(horizon_mod_package::manifest::MANIFEST);
+        let text = fs::read_to_string(&path).unwrap()
+            + "[[native.module]]\nid = 'runtime'\nfile = 'crates/horizon-client/src/game.rs'\nname = 'runtime'\nsource = 'src/runtime.rs'\n";
+        fs::write(path, text).unwrap();
+        fs::write(root.join("src/runtime.rs"), "pub fn run() {}\n").unwrap();
+        let bundle = super::super::bundle_in(&root).unwrap().unwrap();
+        let key = || {
+            super::super::inject_cache::key(
+                "revision",
+                "mixins",
+                super::super::Profile::Balanced,
+                std::slice::from_ref(&bundle),
+            )
+            .unwrap()
+        };
+        let before = key();
+        fs::write(
+            root.join("src/runtime.rs"),
+            "pub fn run() { let _value = 7; }\n",
+        )
+        .unwrap();
+        assert_ne!(before, key());
         fs::remove_dir_all(root).unwrap();
     }
 

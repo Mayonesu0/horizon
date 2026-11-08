@@ -811,7 +811,7 @@ fn build_with_gameplay<G: GameplayStateSource>(
             .map_err(|e| invalid(e.to_string()))?;
     }
     let fluid_built = fluid_definitions
-        .build(|name, _| FluidKind::from_name(name).map(|kind| kind as u8))
+        .build(|name, _| FluidKind::from_name(name).and_then(FluidKind::vanilla_index))
         .map_err(|e| invalid(e.to_string()))?;
     let fluid_mask = |name: &str| -> u8 {
         fluid_built
@@ -865,6 +865,12 @@ fn build_with_gameplay<G: GameplayStateSource>(
             int(3) as u8,
             row.get(4).and_then(Value::as_bool).unwrap_or(false),
         );
+        let fluid = registry
+            .state(BlockStateId(id as u32))
+            .map(crate::fluid::mod_fluid_of_block)
+            .transpose()?
+            .flatten()
+            .unwrap_or(fluid);
         facts.push(StateFacts {
             flags,
             sturdy: int(0) as u32,

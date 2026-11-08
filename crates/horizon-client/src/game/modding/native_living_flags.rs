@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn living_flags_villager_sleep_rejects_invalid_beds_without_mutation() {
-        with_game(|game| {
+        crate::game::entity::taken_pass_tests::in_both_dimensions(|game, balance| {
             guest_server(game, true, false);
             let kind = game
                 .res
@@ -1174,6 +1174,7 @@ mod tests {
                 .unwrap();
             game.world.set(4, 64, 4, stone).unwrap();
             bed(game, "minecraft:straw_bed", [6, 64, 6]); // no foot -> no sleep shape
+            balance.drain_balanced();
             for pos in [[5, 64, 5], [4, 64, 4], [1600, 64, 1600], [6, 64, 6]] {
                 let before = horizon_client::entity_nbt::mob_to_nbt(
                     &game.mobs[0],
@@ -1195,11 +1196,16 @@ mod tests {
                 );
                 assert_eq!(game.mobs[0].position, Vec3::new(3.0, 64.0, 5.0));
                 assert_eq!(game.living_sleeping_pos(living), None);
+                assert_eq!(balance.drain_balanced(), 0, "rejected bed opened a pass");
             }
             bed(game, "minecraft:red_bed", [5, 64, 5]);
-            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(game, |game| {
-                assert!(game.living_start_sleeping(living, [5, 64, 5]));
-            });
+            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(
+                game,
+                balance,
+                |game| {
+                    assert!(game.living_start_sleeping(living, [5, 64, 5]));
+                },
+            );
             assert_eq!(game.living_sleeping_pos(living), Some([5, 64, 5]));
             assert_eq!(game.mobs[0].position, Vec3::new(5.5, 64.6875, 5.5));
             assert_eq!(
@@ -1213,9 +1219,13 @@ mod tests {
                     .map(String::as_str),
                 Some("true")
             );
-            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(game, |game| {
-                assert!(game.living_stop_sleeping(living));
-            });
+            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(
+                game,
+                balance,
+                |game| {
+                    assert!(game.living_stop_sleeping(living));
+                },
+            );
             assert_eq!(game.living_sleeping_pos(living), None);
             assert_eq!(
                 game.pack

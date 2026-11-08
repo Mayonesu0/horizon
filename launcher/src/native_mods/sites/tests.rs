@@ -1,4 +1,5 @@
 use super::*;
+use horizon_mod_package::Manifest;
 use std::{fs, path::Path, process::Command};
 
 #[path = "slot_lists.rs"]
@@ -82,11 +83,6 @@ fn unchanged_callback_compiles_against_both_canonical_facades() {
             "call":"horizon_client::game::Game::step", "ctx":"statement", "hash":"place", "private":private,
             "listener":format!("horizon_client::game::__{physical}Listener"), "record":format!("horizon_client::game::__{physical}Args"), "output":"u32"
         })).unwrap();
-        let legacy: Injection = serde_json::from_value(serde_json::json!({"id":"legacy", "kind":"BEFORE_CALL", "target":site.target, "selector":site.selector, "raw":"with"})).unwrap();
-        assert_eq!(
-            find(std::slice::from_ref(&site), &legacy).is_none(),
-            private
-        );
         let (mut exports, mut constructors, mut crates) =
             (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
         site.facade(&mut exports, &mut constructors, &mut crates);
@@ -204,6 +200,37 @@ fn site_routes_validate_freshness_and_execute_every_kind_adapter() {
         assert!(Manifest::parse(&(text + "cancellable=true\n")).is_err());
     }
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn source_call_identity_does_not_require_a_legacy_selector() {
+    use super::super::{internals::Catalog, slots};
+    use horizon_mod_package::manifest::inject::{InjectError, Route};
+    let manifest = Manifest::parse("id='example'\nname='Example'\nversion='1.0.0'\napi='0.2'\ncapabilities=['registries']\n[native]\ngame='26.3'\nhorizon='0123456789012345678901234567890123456789'\nmixins='0123456789012345678901234567890123456789'\n[[inject]]\nid='condition'\nat='game::run'\nkind='wrap_if'\nwith='hook'\naccess='internals'\nhash='signature'\ncall='game::step'\nnth=0\nctx='statement'\n").unwrap();
+    // Staged source sites use resolved call identity, not legacy self.step selectors.
+    let site: Site = serde_json::from_value(serde_json::json!({
+        "name":"Sprivate", "target":"game::run", "ordinal":0,
+        "call":"game::step", "ctx":"statement", "hash":"place", "private":true,
+        "listener":"game::__SprivateListener", "record":"game::__SprivateArgs", "output":"()"
+    }))
+    .unwrap();
+    let mut catalog = Catalog {
+        internals: serde_json::from_value(serde_json::json!([{
+            "path":"game::run", "kind":"fn", "signature":"fn run()", "hash":"signature"
+        }]))
+        .unwrap(),
+        sites: vec![site],
+        ..Catalog::default()
+    };
+    assert!(matches!(
+        slots::routes(&catalog, &manifest).unwrap().as_slice(),
+        [Route::Source(_)]
+    ));
+    catalog.sites[0].output = "u32".into();
+    assert!(matches!(
+        slots::check(&catalog, &manifest),
+        Err(InjectError::Invalid { field: "kind", .. })
+    ));
 }
 
 #[test]

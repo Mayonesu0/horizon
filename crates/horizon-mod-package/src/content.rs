@@ -254,6 +254,27 @@ impl BlockShapes {
     }
 }
 
+/// The querying entity class, captured by the real caller. Empty and position-only
+/// queries have no entity and always use the ordinary shape tables.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum ShapeEntityKind {
+    Item,
+    Player,
+    Living,
+    Other,
+}
+impl ShapeEntityKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Item => "item",
+            Self::Player => "player",
+            Self::Living => "living",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// A state property a block declares on its own, beside its template's.
 /// A block's states become the template's states times these values, so a
 /// pipe can have a connection per side without a template that has one.
@@ -293,6 +314,11 @@ struct BlockFile {
     properties: BlockProperties,
     shapes: Option<BlockShapes>,
     collision_shapes: Option<BlockShapes>,
+    #[serde(default)]
+    outline_context_shapes: BTreeMap<ShapeEntityKind, BlockShapes>,
+    #[serde(default)]
+    collision_context_shapes: BTreeMap<ShapeEntityKind, BlockShapes>,
+    interaction_shapes: Option<BlockShapes>,
     #[serde(default)]
     state_properties: BTreeMap<String, StateProperty>,
     #[serde(default)]
@@ -338,6 +364,11 @@ pub struct Block {
     pub properties: BlockProperties,
     pub shapes: Option<BlockShapes>,
     pub collision_shapes: Option<BlockShapes>,
+    /// Independent overrides for actual entity queries; omitted kinds use the defaults.
+    pub outline_context_shapes: BTreeMap<ShapeEntityKind, BlockShapes>,
+    pub collision_context_shapes: BTreeMap<ShapeEntityKind, BlockShapes>,
+    /// Ray-face override; does not replace the outline hit point or create a hit.
+    pub interaction_shapes: Option<BlockShapes>,
     /// State properties of its own, which its template does not have.
     pub state_properties: BTreeMap<String, StateProperty>,
     /// State properties overlaid on the template default.
@@ -393,6 +424,52 @@ struct CreativeTabFile {
 struct FluidFile {
     sprite: Option<String>,
     tint: Option<u32>,
+    world: Option<WorldFluid>,
+}
+
+/// What makes a fluid exist in the world: a block holding it, as `minecraft:water`'s does, and
+/// how it flows. Each value defaults to water's, in `data/<id>/horizon/fluid/` as in code
+/// (`Registrar::declare_world_fluid`).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorldFluid {
+    /// Game ticks between two flow steps (`Fluid.getTickDelay`), 1 or more.
+    pub tick_delay: i32,
+    /// What it loses per block it flows (`FlowingFluid.getDropOff`), 1 to 7.
+    pub drop_off: i32,
+    /// How far it looks for a way down (`FlowingFluid.getSlopeFindDistance`), 1 to 4.
+    pub slope_find_distance: i32,
+    /// Whether two sources make a third (`FlowingFluid.canConvertToSource`). Off by default:
+    /// water's comes from a game rule, which a mod's fluid does not read.
+    pub source_conversion: bool,
+    /// Whether it has a filled bucket, the item `<id>_bucket`.
+    pub bucket: bool,
+}
+impl Default for WorldFluid {
+    fn default() -> Self {
+        Self {
+            tick_delay: 5,
+            drop_off: 1,
+            slope_find_distance: 4,
+            source_conversion: false,
+            bucket: true,
+        }
+    }
+}
+impl WorldFluid {
+    /// Refuses values the simulation cannot run: no step, no spread, or an unbounded search.
+    pub fn check(&self) -> Result<(), String> {
+        if self.tick_delay < 1 {
+            return Err("tick_delay is 1 or more".into());
+        }
+        if !(1..=7).contains(&self.drop_off) {
+            return Err("drop_off is 1 to 7".into());
+        }
+        if !(1..=4).contains(&self.slope_find_distance) {
+            return Err("slope_find_distance is 1 to 4".into());
+        }
+        Ok(())
+    }
 }
 
 /// How a fluid the mod names looks on the client (`data/<id>/horizon/fluid/`), as
@@ -406,6 +483,54 @@ pub struct FluidLook {
     pub sprite: Option<String>,
     /// `0xAARRGGBB`.
     pub tint: Option<u32>,
+    /// How it exists in the world; none for a fluid only a tank holds.
+    pub world: Option<WorldFluid>,
+}
+impl FluidLook {
+    /// The registry name of its flowing form: `<namespace>:flowing_<path>`.
+    pub fn flowing_id(&self) -> String {
+        match self.id.split_once(':') {
+            Some((namespace, path)) => format!("{namespace}:flowing_{path}"),
+            None => format!("flowing_{}", self.id),
+        }
+    }
+    /// The filled bucket a world fluid has.
+    pub fn bucket_id(&self) -> Option<String> {
+        self.world
+            .filter(|world| world.bucket)
+            .map(|_| format!("{}_bucket", self.id))
+    }
+    /// The block a world fluid is in the world: water's behaviour and states under its own id.
+    pub fn world_block(&self) -> Option<Block> {
+        self.world.map(|_| Block {
+            id: self.id.clone(),
+            template: "minecraft:water".into(),
+            ..Block::default()
+        })
+    }
+    /// The item its bucket is: a water bucket's under its own id, leaving the empty bucket.
+    pub fn world_bucket(&self) -> Option<Item> {
+        self.bucket_id().map(|id| Item {
+            id,
+            template: "minecraft:water_bucket".into(),
+            crafting_remainder: Some("minecraft:bucket".into()),
+            ..Item::default()
+        })
+    }
+}
+
+/// What a world fluid draws with beyond its [`FluidLook`], as NeoForge's fluid models: registered
+/// by a client mod in `register_fluid_models`. An unset sprite keeps the look's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FluidModel {
+    /// The world fluid's id, `<mod id>:<path>`.
+    pub fluid: String,
+    /// The block atlas sprite on a surface at rest; the look's `sprite` when unset.
+    pub still: Option<String>,
+    /// The sprite on a surface that flows, and on its sides; `still` when unset.
+    pub flowing: Option<String>,
+    /// The sprite on sides against glass and leaves, as water's overlay; `flowing` when unset.
+    pub overlay: Option<String>,
 }
 
 /// A creative inventory tab the mod adds (`data/<id>/horizon/creative_tab/`):
@@ -585,6 +710,57 @@ pub struct MenuType {
     /// slots a player takes from but never puts into, each below `slots`.
     #[serde(default)]
     pub results: Vec<u16>,
+    /// a crafting grid over some of the slots, which crafts as vanilla's
+    /// crafting table does (`CraftingMenu`).
+    #[serde(default)]
+    pub crafting: Option<MenuCrafting>,
+    /// slots that show other containers' slots instead of the block
+    /// entity's, as a crafting station shows the chests beside it; a native
+    /// mod names the containers (`native_menu_links`).
+    #[serde(default)]
+    pub links: Option<MenuLinks>,
+}
+
+/// a mod menu type's linked slots (`links`): `count` slots from `from` on,
+/// which show the slots of the containers a native mod links them to
+/// (`native_menu_links`), in order, rather than the block entity's. The
+/// block entity never holds them; a linked slot with nothing behind it holds
+/// nothing and takes nothing.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MenuLinks {
+    /// the first linked slot.
+    pub from: u16,
+    /// how many slots, 1 or more.
+    pub count: u16,
+}
+
+impl MenuLinks {
+    fn range(&self) -> std::ops::Range<u32> {
+        u32::from(self.from)..u32::from(self.from) + u32::from(self.count)
+    }
+}
+
+/// a mod menu type's crafting grid (`crafting`): `size`x`size` slots from
+/// `grid` on, row by row, and the slot that shows what they craft
+/// (`ResultSlot`). The block entity holds the grid; the result is the
+/// menu's, never in the block entity.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MenuCrafting {
+    /// the grid's first slot.
+    pub grid: u16,
+    /// 2 (the inventory's grid) or 3 (a crafting table's); 3 by default.
+    #[serde(default = "MenuCrafting::default_size")]
+    pub size: u16,
+    /// the result slot, outside the grid and not one of `results`.
+    pub result: u16,
+}
+
+impl MenuCrafting {
+    fn default_size() -> u16 {
+        3
+    }
 }
 
 /// the most container or data slots a mod menu type has, as many as a mod
@@ -907,6 +1083,9 @@ impl Content {
                 properties: file.properties,
                 shapes: file.shapes,
                 collision_shapes: file.collision_shapes,
+                outline_context_shapes: file.outline_context_shapes,
+                collision_context_shapes: file.collision_context_shapes,
+                interaction_shapes: file.interaction_shapes,
                 state_properties: file.state_properties,
                 default_state: file.default_state,
                 item: file.item,
@@ -1003,11 +1182,37 @@ impl Content {
                     "{name}: sprite is an atlas sprite id (namespace:path)"
                 ));
             }
-            self.fluids.push(FluidLook {
+            if let Some(world) = &file.world {
+                world.check().map_err(|e| format!("{name}: world: {e}"))?;
+            }
+            let look = FluidLook {
                 id: fluid,
                 sprite: file.sprite,
                 tint: file.tint,
-            });
+                world: file.world,
+            };
+            if self.fluids.iter().any(|known| {
+                known.id == look.id
+                    || (known.world.is_some() && known.flowing_id() == look.id)
+                    || (look.world.is_some()
+                        && (look.flowing_id() == known.id
+                            || (known.world.is_some() && look.flowing_id() == known.flowing_id())))
+            }) {
+                return Err(format!("{name}: fluid name declared twice"));
+            }
+            if let Some(block) = look.world_block() {
+                if self.blocks.iter().any(|known| known.id == block.id) {
+                    return Err(format!("{name}: block {} is declared twice", block.id));
+                }
+                self.blocks.push(block);
+            }
+            if let Some(item) = look.world_bucket() {
+                if self.items.iter().any(|known| known.id == item.id) {
+                    return Err(format!("{name}: item {} is declared twice", item.id));
+                }
+                self.items.push(item);
+            }
+            self.fluids.push(look);
         }
         for (kind, name) in types {
             let file: EntityType =
@@ -1094,6 +1299,50 @@ impl Content {
                     return Err(format!("{name}: result {r} is listed twice"));
                 }
             }
+            if let Some(c) = file.crafting {
+                let end = u32::from(c.grid) + u32::from(c.size) * u32::from(c.size);
+                if !matches!(c.size, 2 | 3) {
+                    return Err(format!("{name}: crafting size is 2 or 3"));
+                }
+                if end > u32::from(file.slots) || c.result >= file.slots {
+                    return Err(format!(
+                        "{name}: the crafting grid and result are slots below {}",
+                        file.slots
+                    ));
+                }
+                if (u32::from(c.grid)..end).contains(&u32::from(c.result)) {
+                    return Err(format!("{name}: the crafting result is in its grid"));
+                }
+                if file
+                    .results
+                    .iter()
+                    .any(|&r| r == c.result || (u32::from(c.grid)..end).contains(&u32::from(r)))
+                {
+                    return Err(format!(
+                        "{name}: results lists a crafting slot (the result is take-only already)"
+                    ));
+                }
+            }
+            if let Some(l) = file.links {
+                let linked = l.range();
+                if l.count == 0 || linked.end > u32::from(file.slots) {
+                    return Err(format!(
+                        "{name}: links are 1 or more slots below {}",
+                        file.slots
+                    ));
+                }
+                if file.results.iter().any(|&r| linked.contains(&u32::from(r))) {
+                    return Err(format!("{name}: results lists a linked slot"));
+                }
+                if let Some(c) = file.crafting {
+                    let end = u32::from(c.grid) + u32::from(c.size) * u32::from(c.size);
+                    if linked.contains(&u32::from(c.result))
+                        || (u32::from(c.grid)..end).any(|s| linked.contains(&s))
+                    {
+                        return Err(format!("{name}: links overlap the crafting slots"));
+                    }
+                }
+            }
             self.menu_types.push(MenuType { id: menu, ..file });
         }
         Ok(())
@@ -1160,7 +1409,14 @@ fn check_block(file: &Block) -> Result<(), String> {
             file.template
         ));
     }
-    for shapes in file.shapes.iter().chain(file.collision_shapes.iter()) {
+    for shapes in file
+        .shapes
+        .iter()
+        .chain(file.collision_shapes.iter())
+        .chain(file.outline_context_shapes.values())
+        .chain(file.collision_context_shapes.values())
+        .chain(file.interaction_shapes.iter())
+    {
         shapes.check()?;
     }
     for (name, property) in &file.state_properties {
@@ -1686,6 +1942,9 @@ capabilities = ["registries"]
                 template: "minecraft:iron_block".into(),
                 shapes: None,
                 collision_shapes: None,
+                outline_context_shapes: BTreeMap::new(),
+                collision_context_shapes: BTreeMap::new(),
+                interaction_shapes: None,
                 state_properties: BTreeMap::new(),
                 default_state: BTreeMap::new(),
                 properties: BlockProperties {
@@ -1893,6 +2152,10 @@ capabilities = ["registries"]
                 br#"{"slots": 9, "data_slots": 2, "results": [7, 8]}"#,
             ),
             ("data/ruby/horizon/menu/bag.json", br#"{"slots": 4}"#),
+            (
+                "data/ruby/horizon/menu/station.json",
+                br#"{"slots": 16, "results": [11], "crafting": {"grid": 1, "result": 0}, "links": {"from": 12, "count": 4}}"#,
+            ),
         ];
         let content = hmod("menus", MANIFEST_TEXT, files).unwrap();
         let menus: Vec<_> = content
@@ -1902,7 +2165,29 @@ capabilities = ["registries"]
             .collect();
         assert_eq!(
             menus,
-            [("ruby:bag", 4, 0, vec![]), ("ruby:press", 9, 2, vec![7, 8])]
+            [
+                ("ruby:bag", 4, 0, vec![]),
+                ("ruby:press", 9, 2, vec![7, 8]),
+                ("ruby:station", 16, 0, vec![11])
+            ]
+        );
+        let links: Vec<_> = content.menu_types.iter().map(|m| m.links).collect();
+        assert_eq!(
+            links,
+            [None, None, Some(super::MenuLinks { from: 12, count: 4 })]
+        );
+        let crafting: Vec<_> = content.menu_types.iter().map(|m| m.crafting).collect();
+        assert_eq!(
+            crafting,
+            [
+                None,
+                None,
+                Some(super::MenuCrafting {
+                    grid: 1,
+                    size: 3,
+                    result: 0
+                })
+            ]
         );
         for (case, file, why) in [
             ("menu-empty", r#"{"slots": 0}"#, "slots is 1 to 256"),
@@ -1923,6 +2208,61 @@ capabilities = ["registries"]
                 "result 1 is listed twice",
             ),
             ("menu-key", r#"{"slots": 3, "rows": 1}"#, "unknown field"),
+            (
+                "craft-size",
+                r#"{"slots": 20, "crafting": {"grid": 0, "size": 4, "result": 19}}"#,
+                "crafting size is 2 or 3",
+            ),
+            (
+                "craft-past",
+                r#"{"slots": 9, "crafting": {"grid": 1, "result": 0}}"#,
+                "grid and result are slots below 9",
+            ),
+            (
+                "craft-result-past",
+                r#"{"slots": 9, "crafting": {"grid": 0, "size": 2, "result": 9}}"#,
+                "grid and result are slots below 9",
+            ),
+            (
+                "craft-overlap",
+                r#"{"slots": 10, "crafting": {"grid": 0, "result": 4}}"#,
+                "the crafting result is in its grid",
+            ),
+            (
+                "craft-results",
+                r#"{"slots": 10, "results": [2], "crafting": {"grid": 0, "result": 9}}"#,
+                "results lists a crafting slot",
+            ),
+            (
+                "craft-key",
+                r#"{"slots": 10, "crafting": {"grid": 0, "result": 9, "width": 3}}"#,
+                "unknown field",
+            ),
+            (
+                "links-past",
+                r#"{"slots": 10, "links": {"from": 8, "count": 3}}"#,
+                "links are 1 or more slots below 10",
+            ),
+            (
+                "links-empty",
+                r#"{"slots": 10, "links": {"from": 2, "count": 0}}"#,
+                "links are 1 or more slots below 10",
+            ),
+            (
+                "links-results",
+                r#"{"slots": 10, "results": [5], "links": {"from": 4, "count": 2}}"#,
+                "results lists a linked slot",
+            ),
+            (
+                "links-grid",
+                r#"{"slots": 20, "crafting": {"grid": 1, "result": 0}, "links": {"from": 9, "count": 4}}"#,
+                "links overlap the crafting slots",
+            ),
+            (
+                "links-key",
+                r#"{"slots": 10, "links": {"from": 2, "count": 2, "rows": 1}}"#,
+                "unknown field",
+            ),
             ("menu-missing", r#"{"data_slots": 1}"#, "missing field"),
         ] {
             let files: &[(&str, &[u8])] = &[("data/ruby/horizon/menu/a.json", file.as_bytes())];
@@ -2522,6 +2862,76 @@ capabilities = ["registries"]
 
     /// A creative tab: a title, an icon and its items, all item ids.
     #[test]
+    fn world_fluid_generated_names_cannot_collide() {
+        let files: &[(&str, &[u8])] = &[
+            ("data/ruby/horizon/fluid/oil.json", br#"{"world":{}}"#),
+            (
+                "data/ruby/horizon/fluid/flowing_oil.json",
+                br#"{"world":{}}"#,
+            ),
+        ];
+        assert!(
+            hmod("fluid-collision", MANIFEST_TEXT, files)
+                .unwrap_err()
+                .contains("declared twice")
+        );
+    }
+
+    #[test]
+    fn a_world_fluid_brings_its_block_and_bucket() {
+        let files: &[(&str, &[u8])] = &[
+            (
+                "data/ruby/horizon/fluid/oil.json",
+                br#"{"tint":4278190080,"world":{"tick_delay":20,"drop_off":2,"slope_find_distance":2}}"#,
+            ),
+            (
+                "data/ruby/horizon/fluid/mist.json",
+                br#"{"world":{"bucket":false}}"#,
+            ),
+        ];
+        let content = hmod("world-fluid", MANIFEST_TEXT, files).unwrap();
+        let oil = content.fluids.iter().find(|f| f.id == "ruby:oil").unwrap();
+        assert_eq!(oil.flowing_id(), "ruby:flowing_oil");
+        assert_eq!(oil.world.unwrap().tick_delay, 20);
+        assert!(!oil.world.unwrap().source_conversion);
+        let block = content.blocks.iter().find(|b| b.id == "ruby:oil").unwrap();
+        assert_eq!(block.template, "minecraft:water");
+        assert!(!block.item, "the fluid's block has no block item");
+        let bucket = content
+            .items
+            .iter()
+            .find(|i| i.id == "ruby:oil_bucket")
+            .unwrap();
+        assert_eq!(bucket.template, "minecraft:water_bucket");
+        assert!(content.blocks.iter().any(|b| b.id == "ruby:mist"));
+        assert!(!content.items.iter().any(|i| i.id == "ruby:mist_bucket"));
+    }
+
+    #[test]
+    fn a_world_fluid_refuses_what_cannot_flow_and_a_second_block() {
+        for world in [
+            br#"{"world":{"tick_delay":0}}"#.as_slice(),
+            br#"{"world":{"drop_off":8}}"#,
+            br#"{"world":{"slope_find_distance":5}}"#,
+        ] {
+            let files: &[(&str, &[u8])] = &[("data/ruby/horizon/fluid/oil.json", world)];
+            assert!(hmod("bad-world-fluid", MANIFEST_TEXT, files).is_err());
+        }
+        let files: &[(&str, &[u8])] = &[
+            ("data/ruby/horizon/fluid/oil.json", br#"{"world":{}}"#),
+            (
+                "data/ruby/horizon/block/oil.json",
+                br#"{"template":"minecraft:stone"}"#,
+            ),
+        ];
+        assert!(
+            hmod("clashing-world-fluid", MANIFEST_TEXT, files)
+                .unwrap_err()
+                .contains("declared twice")
+        );
+    }
+
+    #[test]
     fn fluids_declare_a_sprite_and_a_tint() {
         let files: &[(&str, &[u8])] = &[
             (
@@ -2537,12 +2947,14 @@ capabilities = ["registries"]
                 FluidLook {
                     id: "ruby:bare".into(),
                     sprite: None,
-                    tint: None
+                    tint: None,
+                    world: None,
                 },
                 FluidLook {
                     id: "ruby:steam".into(),
                     sprite: Some("ruby:gui/fluids/steam".into()),
-                    tint: Some(4291343520)
+                    tint: Some(4291343520),
+                    world: None,
                 },
             ]
         );
@@ -2812,5 +3224,48 @@ capabilities = ["registries"]
         ] {
             assert!(check_path(bad).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod context_shape_tests {
+    use super::*;
+    #[test]
+    fn context_shape_selectors_and_tables_are_validated() {
+        for selector in ["item", "player", "living", "other"] {
+            for channel in ["outline_context_shapes", "collision_context_shapes"] {
+                let text = format!(
+                    r#"{{"template":"minecraft:stone","{channel}":{{"{selector}":{{"default":[]}}}}}}"#
+                );
+                let _: BlockFile = serde_json::from_str(&text).unwrap();
+            }
+        }
+        for selector in ["none", "Item", "minecraft:item", "entity"] {
+            let text = format!(
+                r#"{{"template":"minecraft:stone","collision_context_shapes":{{"{selector}":{{"default":[]}}}}}}"#
+            );
+            assert!(serde_json::from_str::<BlockFile>(&text).is_err());
+        }
+        let mut block = Block {
+            template: "minecraft:stone".into(),
+            ..Default::default()
+        };
+        let bad = BlockShapes {
+            properties: vec![],
+            values: BTreeMap::new(),
+            default: Some(vec![[1., 0., 0., 0., 1., 1.]]),
+        };
+        block
+            .outline_context_shapes
+            .insert(ShapeEntityKind::Player, bad.clone());
+        assert!(check_block(&block).is_err());
+        block.outline_context_shapes.clear();
+        block
+            .collision_context_shapes
+            .insert(ShapeEntityKind::Item, bad.clone());
+        assert!(check_block(&block).is_err());
+        block.collision_context_shapes.clear();
+        block.interaction_shapes = Some(bad);
+        assert!(check_block(&block).is_err());
     }
 }

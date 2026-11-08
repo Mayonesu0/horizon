@@ -22,7 +22,8 @@ pub trait BlockEntitiesServerHost {
     /// do (`ServerLevel.tick` broadcasts chunks before it ticks block
     /// entities). Call it when what clients show changed (a machine started),
     /// not for every tick's progress: a menu's data slots carry that. Nothing
-    /// happens for an unloaded block.
+    /// happens for an unloaded block. It also sends the one-shot fields of
+    /// `ModBlockEntityView::set_client_update_fields`.
     #[access(WorldOnly)]
     fn block_entity_sync(&mut self, pos: [i32; 3]);
 }

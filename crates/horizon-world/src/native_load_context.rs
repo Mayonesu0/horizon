@@ -56,23 +56,7 @@ struct Snapshot {
 impl Snapshot {
     /// Captures settings for `mod_ids`; the registry inputs are shared, not scanned again.
     fn capture<'a>(inputs: Arc<LoadInputs>, mod_ids: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut settings = BTreeMap::new();
-        for mod_id in mod_ids {
-            let directory = inputs.settings_root.join(mod_id);
-            let Ok(files) = fs::read_dir(&directory) else {
-                continue;
-            };
-            let mut values = BTreeMap::new();
-            for file in files.flatten() {
-                let Ok(key) = file.file_name().into_string() else {
-                    continue;
-                };
-                if let Some(value) = read_setting(&directory, &key) {
-                    values.insert(key, value);
-                }
-            }
-            settings.insert(mod_id.to_owned(), values);
-        }
+        let settings = capture_settings(&inputs.settings_root, mod_ids);
         Self { inputs, settings }
     }
 
@@ -212,6 +196,195 @@ impl LoopContext {
     }
 }
 
+/// Capture regular UTF-8 files only, never following symlinks (even within the root).
+/// Refused keys are absent. Limits are measured before whitespace trimming.
+pub const MAX_SETTING_BYTES: usize = 64 * 1024;
+const MAX_VISITED_NAMES: usize = 4096;
+pub const MAX_SETTING_KEYS: usize = 1024;
+pub const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+
+pub fn capture_settings<'a>(
+    settings_root: &Path,
+    mod_ids: impl IntoIterator<Item = &'a str>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut settings = BTreeMap::new();
+    let mut total = 0;
+    let mut refused = [false; 4];
+    for mod_id in mod_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        // Package ids are normally validated at load time; do not let this public
+        // filesystem boundary interpret a path supplied by a caller.
+        if Path::new(mod_id).components().count() != 1
+            || !matches!(
+                Path::new(mod_id).components().next(),
+                Some(std::path::Component::Normal(_))
+            )
+        {
+            refused[0] = true;
+            continue;
+        }
+        let Ok(files) = snapshot_files(settings_root, mod_id) else {
+            refused[0] = true;
+            continue;
+        };
+        let mut values = BTreeMap::new();
+        for entry in files {
+            let Ok((key, mut file)) = entry else {
+                refused[0] = true;
+                continue;
+            };
+            if values.len() >= MAX_SETTING_KEYS {
+                refused[1] = true;
+                break;
+            }
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            if file
+                .by_ref()
+                .take((MAX_SETTING_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                refused[0] = true;
+                continue;
+            }
+            if bytes.len() > MAX_SETTING_BYTES || bytes.len() > MAX_SNAPSHOT_BYTES - total {
+                refused[2] = true;
+                continue;
+            }
+            let Ok(value) = String::from_utf8(bytes) else {
+                refused[3] = true;
+                continue;
+            };
+            total += value.len();
+            values.insert(key, value.trim().to_owned());
+        }
+        settings.insert(mod_id.to_owned(), values);
+    }
+    for (refused, class) in refused.into_iter().zip([
+        "unsafe or unreadable entry, or enumeration limit",
+        "key limit",
+        "byte limit",
+        "invalid UTF-8",
+    ]) {
+        if refused {
+            log::warn!("Mod settings snapshot omitted keys: {class}");
+        }
+    }
+    settings
+}
+
+// Reject the whole package beyond the enumeration budget: retaining an arbitrary
+// prefix would make the result depend on filesystem enumeration order again.
+fn sorted_names(
+    names: impl Iterator<Item = std::io::Result<String>>,
+) -> std::io::Result<Vec<String>> {
+    let mut result = Vec::new();
+    for name in names {
+        if result.len() == MAX_VISITED_NAMES {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        result.push(name?);
+    }
+    result.sort_unstable();
+    Ok(result)
+}
+
+#[cfg(unix)]
+fn snapshot_files(
+    root: &Path,
+    mod_id: &str,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<(String, fs::File)>>> {
+    snapshot_files_with_hook(root, mod_id, |_| {})
+}
+
+#[cfg(unix)]
+fn snapshot_files_with_hook(
+    root: &Path,
+    mod_id: &str,
+    after_open: impl Fn(&str),
+) -> std::io::Result<impl Iterator<Item = std::io::Result<(String, fs::File)>>> {
+    use rustix::fs::{Dir, Mode, OFlags, open, openat};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let root = open(root, flags | OFlags::DIRECTORY, Mode::empty())?;
+    let directory = openat(&root, mod_id, flags | OFlags::DIRECTORY, Mode::empty())?;
+    let entries = Dir::read_from(&directory)?;
+    let names = sorted_names(entries.filter_map(|entry| {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => return Some(Err(error.into())),
+        };
+        let name = entry.file_name();
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            return None;
+        }
+        Some(
+            name.to_str()
+                .map(str::to_owned)
+                .map_err(|_| std::io::ErrorKind::InvalidData.into()),
+        )
+    }))?;
+    Ok(names.into_iter().map(move |key| {
+        let file = fs::File::from(openat(&directory, key.as_str(), flags, Mode::empty())?);
+        after_open(&key);
+        if !file.metadata()?.is_file() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        Ok((key, file))
+    }))
+}
+
+#[cfg(windows)]
+fn snapshot_files(
+    root: &Path,
+    mod_id: &str,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<(String, fs::File)>>> {
+    use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+    use cap_std::fs::{Dir, OpenOptions};
+    // Open the parent as a capability, then refuse a reparse point at the root
+    // and package boundary as well as at each individual file boundary.
+    let parent = root.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let name = root.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let parent = Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    let root = parent.open_dir_nofollow(name)?;
+    let directory = root.open_dir_nofollow(mod_id)?;
+    let names = sorted_names(directory.entries()?.map(|entry| {
+        entry?
+            .file_name()
+            .into_string()
+            .map_err(|_| std::io::ErrorKind::InvalidData.into())
+    }))?;
+    Ok(names.into_iter().map(move |key| {
+        let metadata = directory.symlink_metadata(&key)?;
+        use cap_std::fs::MetadataExt;
+        if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = directory.open_with(&key, &options)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        Ok((key, file.into_std()))
+    }))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn snapshot_files(
+    root: &Path,
+    mod_id: &str,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<(String, fs::File)>>> {
+    // Fail closed on targets without descriptor-relative no-follow traversal.
+    let _ = (root, mod_id);
+    Err::<std::iter::Empty<std::io::Result<(String, fs::File)>>, _>(
+        std::io::ErrorKind::Unsupported.into(),
+    )
+}
+
 /// Read the same per-key storage as the runtime settings service. No folder is
 /// created, and unrelated mod data files are not scanned or loaded eagerly.
 pub fn read_setting(directory: &Path, key: &str) -> Option<String> {
@@ -223,6 +396,204 @@ pub fn read_setting(directory: &Path, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "snapshot-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(root.join("reader")).unwrap();
+        root
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reviewer_capture_follows_external_symlink() {
+        let root = root("symlinks");
+        let data = root.join("data");
+        fs::create_dir_all(data.join("reader")).unwrap();
+        fs::write(root.join("secret"), "outside-token").unwrap();
+        std::os::unix::fs::symlink(root.join("secret"), data.join("reader/token")).unwrap();
+        fs::write(data.join("reader/normal"), "inside").unwrap();
+        std::os::unix::fs::symlink("normal", data.join("reader/internal")).unwrap();
+        std::os::unix::fs::symlink("missing", data.join("reader/dangling")).unwrap();
+        std::os::unix::fs::symlink(root.join("reader"), data.join("alias")).unwrap();
+        fs::write(root.join("reader/token"), "escaped").unwrap();
+        let captured = capture_settings(&data, ["reader", "alias", "../reader"]);
+        assert_eq!(captured["reader"].get("token"), None);
+        assert_eq!(captured["reader"].get("internal"), None);
+        assert_eq!(captured["reader"].get("dangling"), None);
+        assert_eq!(captured["reader"]["normal"], "inside");
+        assert!(!captured.contains_key("alias"));
+        assert!(!captured.contains_key("../reader"));
+        std::os::unix::fs::symlink(&data, root.join("linked-root")).unwrap();
+        assert!(capture_settings(&root.join("linked-root"), ["reader"]).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fifo_and_directory_do_not_block_or_become_settings() {
+        let root = root("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(root.join("reader/pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::create_dir(root.join("reader/directory")).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let input = root.clone();
+        let worker =
+            std::thread::spawn(move || send.send(capture_settings(&input, ["reader"])).unwrap());
+        let captured = receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("snapshot blocked on FIFO");
+        assert!(captured["reader"].is_empty());
+        worker.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn admission_is_sorted_and_enumeration_is_bounded() {
+        let root = root("ordered");
+        fs::create_dir(root.join("second")).unwrap();
+        for i in 0..1025 {
+            fs::write(root.join(format!("reader/key{i:04}")), "x").unwrap();
+            fs::write(root.join(format!("second/key{:04}", 1024 - i)), "x").unwrap();
+        }
+        let captured = capture_settings(&root, ["second", "reader"]);
+        assert_eq!(captured["reader"], captured["second"]);
+        assert!(!captured["reader"].contains_key("key1024"));
+        assert_eq!(captured["reader"]["key0000"], "x");
+        for i in 1025..4097 {
+            fs::write(root.join(format!("reader/key{i:04}")), "x").unwrap();
+        }
+        assert!(!capture_settings(&root, ["reader"]).contains_key("reader"));
+        assert!(sorted_names((0..4097).map(|i| Ok(i.to_string()))).is_err());
+        assert_eq!(
+            sorted_names((0..4096).map(|i| Ok(i.to_string())))
+                .unwrap()
+                .len(),
+            4096
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn validates_open_handle_after_entry_replacement() {
+        use std::io::Read;
+        let root = root("replaced");
+        let path = root.join("reader/value");
+        fs::write(&path, "opened value").unwrap();
+        let entries = snapshot_files_with_hook(&root, "reader", |_| {
+            fs::remove_file(&path).unwrap();
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        })
+        .unwrap();
+        let (_, mut file) = entries.into_iter().next().unwrap().unwrap();
+        let mut value = String::new();
+        file.read_to_string(&mut value).unwrap();
+        assert_eq!(value, "opened value");
+
+        // Now open the FIFO, then replace its path with a regular file. Path
+        // metadata would wrongly accept it, but descriptor metadata must refuse.
+        let entries = snapshot_files_with_hook(&root, "reader", |_| {
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, "replacement").unwrap();
+        })
+        .unwrap();
+        assert!(entries.into_iter().next().unwrap().is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn byte_limits_and_invalid_utf8() {
+        let root = root("bytes");
+        fs::write(root.join("reader/exact"), vec![b'a'; 65536]).unwrap();
+        fs::write(root.join("reader/large"), vec![b'b'; 65537]).unwrap();
+        fs::write(root.join("reader/invalid"), [0xff]).unwrap();
+        let captured = capture_settings(&root, ["reader"]);
+        assert_eq!(captured["reader"]["exact"].len(), 65536);
+        assert_eq!(captured["reader"].get("large"), None);
+        assert_eq!(captured["reader"].get("invalid"), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn key_limit() {
+        let root = root("count");
+        for i in 0..1025 {
+            fs::write(root.join(format!("reader/key{i}")), "x").unwrap();
+        }
+        assert_eq!(capture_settings(&root, ["reader"])["reader"].len(), 1024);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reviewer_whitespace_spends_raw_aggregate_budget() {
+        let root = root("raw-budget");
+        for i in 0..256 {
+            fs::write(root.join(format!("reader/key{i:04}")), vec![b' '; 65536]).unwrap();
+        }
+        fs::write(root.join("reader/z-extra"), "x").unwrap();
+        let captured = capture_settings(&root, ["reader"]);
+        assert_eq!(captured["reader"].len(), 256);
+        assert!(!captured["reader"].contains_key("z-extra"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reviewer_symlink_replacement_keeps_opened_value() {
+        use std::io::Read;
+        let root = root("symlink-replaced");
+        let path = root.join("reader/value");
+        fs::write(&path, "opened").unwrap();
+        fs::write(root.join("target"), "replacement").unwrap();
+        let entries = snapshot_files_with_hook(&root, "reader", |_| {
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(root.join("target"), &path).unwrap();
+        })
+        .unwrap();
+        let (_, mut file) = entries.into_iter().next().unwrap().unwrap();
+        let mut value = String::new();
+        file.read_to_string(&mut value).unwrap();
+        assert_eq!(value, "opened");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn aggregate_limit() {
+        let root = root("aggregate");
+        fs::create_dir(root.join("second")).unwrap();
+        for i in 0..129 {
+            for package in ["reader", "second"] {
+                fs::write(root.join(format!("{package}/key{i}")), vec![b'x'; 65536]).unwrap();
+            }
+        }
+        let captured = capture_settings(&root, ["second", "reader"]);
+        assert_eq!(captured["reader"].len(), 129);
+        assert_eq!(captured["second"].len(), 127);
+        assert_eq!(
+            captured
+                .values()
+                .flat_map(|values| values.values())
+                .map(String::len)
+                .sum::<usize>(),
+            16 * 1024 * 1024
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn settings_are_scoped_and_frozen_until_a_new_load() {

@@ -561,11 +561,7 @@ impl Game<'_> {
     /// the confusion effect (`client_portal_effect`). On a server's client
     /// `portals.player` holds only the LocalPlayer's `portalCooldown`.
     pub(super) fn client_inside_nether_portal(&mut self) {
-        let alive = self
-            .player
-            .as_ref()
-            .is_some_and(|p| !p.health.dead_or_dying());
-        if !alive || self.riding.is_some() {
+        if !self.player_can_use_portal() {
             return;
         }
         if self.portals.player.cooldown > 0 {
@@ -758,6 +754,27 @@ impl Game<'_> {
                 process: None,
             },
         );
+    }
+    /// `LivingEntity.canUsePortal` over a player's body and its transport
+    /// (#943): `Entity.canUsePortal(false)` (alive, nobody's passenger) and
+    /// not asleep (`isSleeping`). The one rule the client's portal entry,
+    /// the player in place and the guest arm of the `LivingRef` read answer
+    /// — a parity fix: the client's own entry used to skip the sleep half
+    /// (vanilla `LivingEntity.canUsePortal` checks it).
+    pub(super) fn can_use_portal_of(
+        &self,
+        p: &horizon_client::motion::PlayerMotion,
+        riding: bool,
+        sleeping: bool,
+    ) -> bool {
+        !p.health.dead_or_dying() && !riding && !sleeping
+    }
+    /// [`can_use_portal_of`](Self::can_use_portal_of) for the player of
+    /// this game.
+    pub(super) fn player_can_use_portal(&self) -> bool {
+        self.player
+            .as_ref()
+            .is_some_and(|p| self.can_use_portal_of(p, self.riding.is_some(), p.sleeping))
     }
     /// `canUsePortal(false)` of a mob: what the mob itself decides
     /// (`mobs::mob_can_use_portal`), riding nothing, not asleep, and not
@@ -1082,15 +1099,7 @@ impl Game<'_> {
             self.release_vehicle_container(id);
             let uuid = self.uuid_for(id);
             let b = &self.boats[i];
-            let mut tag = horizon_client::entity_nbt::boat_to_nbt(
-                &b.entity_type(),
-                b.position,
-                b.velocity,
-                [b.yaw, b.pitch],
-                uuid,
-                self.persist_raw(id),
-                b.chest.then_some(&b.items[..]),
-            );
+            let mut tag = b.to_nbt(uuid, self.persist_raw(id));
             // The mobs riding it cross with it and mount it again.
             self.put_mob_passengers(&mut tag, id);
             for rider in self.remove_mob_riders(id) {

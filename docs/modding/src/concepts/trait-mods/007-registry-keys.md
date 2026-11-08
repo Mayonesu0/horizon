@@ -42,6 +42,12 @@ authoritative context or an unavailable mapping returns `None`, not a stale memb
 `block_state_id`, tag names and existing fluid operation arguments remain strings for now.
 
 Declare a tank-only fluid in your own namespace with `r.declare_fluid("chocolate")`; the returned `FluidKey` identifies it for the mod load. Request vanilla or another mod's declared fluid with `r.fluid_key("minecraft:water")` or `r.fluid_key("other:chocolate")`. Requests resolve after all registrations, so declaration order does not matter; an unknown request stops the load and names the requesting mod. Tank-only fluids have no world simulation or world state. Fluid stacks and recipe ingredients use these keys; remaining fluid operations move to them in subsequent changes.
+Declare a fluid that exists in the world with `let mut fluid = WorldFluid::default(); fluid.drop_off = 2; r.declare_world_fluid("oil", fluid);`,
+using `mod_api::WorldFluid`, the code form of a fluid file's `world` object ([content mods](../../how-to/content-mods.md)): it adds the block
+`mymod:oil`, the flowing fluid `mymod:flowing_oil` and the bucket `mymod:oil_bucket`, and its fluid file, if it has one,
+still says how it looks. `r.fluid_part("mymod:oil", Part)` attaches a `FluidPart`, whose `fluid_rules` can change the
+declared values by position on the server. It is asked for every cell a spread looks at, so answer fast.
+
 A saved tank whose fluid's mod is absent carries an opaque unresolved identity. Its stack's
 `key()` is `None`; `UnresolvedFluid::id(host)` reads its saved name. It can move between
 name-backed mod tanks, but not into vanilla buckets or cauldrons.

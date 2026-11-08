@@ -155,10 +155,11 @@ impl Game<'_> {
         let (Some(uuid), Some(name)) = (self.lan_acting_uuid, self.lan_acting_name.clone()) else {
             return false;
         };
+        let mod_fluid = horizon_world::fluid::mod_fluid_of_bucket(&stack.item);
         let fluid = match &*stack.item {
             "minecraft:lava_bucket" => "minecraft:lava",
             "minecraft:powder_snow_bucket" => "minecraft:powder_snow",
-            _ => "minecraft:water",
+            _ => mod_fluid.map_or("minecraft:water", |fluid| fluid.get().id.as_str()),
         };
         let mut cancel = false;
         self.native_bucket_empty(uuid, &name, pos, fluid, &mut cancel);

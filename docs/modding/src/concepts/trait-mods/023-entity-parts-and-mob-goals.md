@@ -4,7 +4,7 @@
 ### Entity parts and mob goals
 
 `r.entity_part("minecraft:zombie", ZombieGoals)` attaches an `EntityPart` to one entity type, a mod's
-own or vanilla's. Its single method `register_goals` runs at every `Mob` construction of that type —
+own or vanilla's. Its method `register_goals` runs at every `Mob` construction of that type —
 spawned or loaded, the moment vanilla's `registerGoals` fan-out ends — and the goals it adds join the
 mob's two selectors beside the species' own, with the same priorities, flag locks and interruption:
 
@@ -39,6 +39,10 @@ mob itself through the engine's own paths: `move_to(pos, speed)` and `stop_navig
 with its setter's side effects, and a brain-backed species refuses, since its target is a brain
 memory that `MobRef::set_brain_target` writes from a server host). Writes to other entities
 are not part of a goal; the write handles a `ServerHost` takes do not exist in a goal tick.
+
+The part's other method, `spawn_cluster_size`, changes how large a natural spawn group of the type grows
+(`Mob.getMaxSpawnClusterSize`); [controlling spawns](../../how-to/spawning.md#changing-how-large-a-spawn-group-grows)
+shows it.
 
 Entity parts are a native mod's for now: the goal surface does not cross to wasm (see the
 `attach_entity_part` note), so `r.entity_part` is absent from a wasm build.

@@ -34,6 +34,12 @@ fn guest_block_entity_tick_updates_host_fields_without_replacing_identity() {
     );
     assert_eq!(entity.data, [23]);
     assert!(entity.items.is_empty());
+    assert_eq!(
+        entity
+            .client_update_fields()
+            .and_then(|fields| fields.get(&"effect".into())),
+        Some(&mod_api::Tag::Int(29))
+    );
     assert_eq!(entity.id(), "bench_mod:counter");
     assert_ne!(entity.revision(), revision);
     let revision = entity.revision();

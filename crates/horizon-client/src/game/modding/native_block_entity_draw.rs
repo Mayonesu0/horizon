@@ -1019,6 +1019,7 @@ impl Game<'_> {
                 x,
                 y: at[1],
                 text: &shown,
+                style: &Default::default(),
                 color: 0xFF00_0000 | (span.style.color.unwrap_or(color) & 0xFF_FFFF),
                 outline: if outline == 0 {
                     0
@@ -1026,8 +1027,14 @@ impl Game<'_> {
                     0xFF00_0000 | (outline & 0xFF_FFFF)
                 },
                 light,
+                tier: 0,
             };
-            push_text(&glyph, &call, &mut draw.vertices);
+            push_text(
+                &glyph,
+                Some(self.gui.atlas.font.white()),
+                &call,
+                &mut draw.vertices,
+            );
             x += width;
         }
         x - at[0]
@@ -2144,6 +2151,133 @@ mod tests {
             };
             assert_eq!(worst(&cpu, &deferred_pixels), 0, "keep and deferred differ");
             assert_eq!(worst(&cpu, &batch_pixels), 0, "keep and batch differ");
+        });
+    }
+
+    /// Under a `shaders/` pack, a batch copy and the per-copy `model()` route draw the same
+    /// vertices in a block-entity run, so our probe pack (one flat colour per program) paints
+    /// both with `gbuffers_block`. Without a pack the batch marks no run and bakes the same.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES and software Vulkan"]
+    fn a_pack_shades_batch_and_per_copy_models_with_one_program() {
+        use super::super::host::draw::{GameBlockEntityDrawContext, GameWorldDrawContext};
+        use horizon_client::gfx::entity_pixel_test::{self, PACK_COLOURS};
+        use mod_api::{BlockEntityDrawContext, LightCoords, ModelInstance, Overlay};
+        use mod_api::{Identifier, WorldDrawContext};
+        let _fixture =
+            horizon_client::models::standalone_fixture(vec!["minecraft:block/grass_block".into()]);
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            let id = Identifier::parse("minecraft:block/grass_block").unwrap();
+            let model = game.render_assets().model(&id).unwrap();
+            let local = Mat4::from_scale_rotation_translation(
+                Vec3::new(0.85, 1.15, 0.7),
+                Quat::from_rotation_y(0.6),
+                Vec3::new(0.12, -0.05, 0.08),
+            );
+            let corner = DVec3::new(8_000_000.0, 70.0, -4_000_001.0);
+            let camera = DVec3::new(8_000_000.3, 70.4, -4_000_003.0);
+            let tint = 0xFF80_C040;
+            let light = LightCoords::new(3, 15).unwrap();
+            let take_spans = |game: &Game<'_>| std::mem::take(&mut *game.entity_spans.borrow_mut());
+            let batch = |game: &mut Game<'_>| {
+                let mut draw = crate::world_geometry::WorldGeometry::default();
+                draw.reset(camera.to_array(), Mat4::IDENTITY, [0.0, 0.0]);
+                let copy =
+                    ModelInstance::new(corner.to_array(), rows(local), tint, light, Overlay::NONE);
+                GameWorldDrawContext {
+                    game,
+                    surface: &mut draw,
+                }
+                .draw_model_instances(model, &[copy])
+                .unwrap();
+                let mut entities = Vec::new();
+                game.commit_model_instances(&mut draw, camera, &mut entities);
+                (entities, take_spans(game))
+            };
+            take_spans(game);
+            let (plain, plain_spans) = batch(game);
+            assert!(
+                !plain.is_empty() && plain_spans.is_empty(),
+                "no pack, no run"
+            );
+
+            game.pack_ids = Some(Default::default());
+            // What `mod_block_entity_geometry` does around a mod's `model()` call.
+            let mut per_copy = draw();
+            per_copy.poses = vec![local];
+            per_copy.light = 0x30F0;
+            game.mark_block_entity(0, 1);
+            GameBlockEntityDrawContext {
+                game,
+                surface: &mut per_copy,
+            }
+            .model(model, tint)
+            .unwrap();
+            game.finish_prepared_draw(&mut per_copy, corner, camera);
+            let shift = (corner - camera).as_vec3();
+            for vertex in &mut per_copy.vertices {
+                vertex.pos = (Vec3::from(vertex.pos) + shift).to_array();
+            }
+            let per_copy_spans = take_spans(game);
+            let (copies, copy_spans) = batch(game);
+            // Independent run-boundary expectations for equal and alternating overlays.
+            for (overlays, expected) in [
+                (vec![], vec![]),
+                (vec![Overlay::NONE; 3], vec![0]),
+                (
+                    vec![Overlay::NONE, Overlay::new(0, true).unwrap(), Overlay::NONE],
+                    vec![0, 1, 2],
+                ),
+            ] {
+                let mut surface = crate::world_geometry::WorldGeometry::default();
+                surface.reset(camera.to_array(), Mat4::IDENTITY, [0.0, 0.0]);
+                let instances: Vec<_> = overlays
+                    .into_iter()
+                    .map(|overlay| {
+                        ModelInstance::new(corner.to_array(), rows(local), tint, light, overlay)
+                    })
+                    .collect();
+                GameWorldDrawContext {
+                    game,
+                    surface: &mut surface,
+                }
+                .draw_model_instances(model, &instances)
+                .unwrap();
+                let mut vertices = Vec::new();
+                game.commit_model_instances(&mut surface, camera, &mut vertices);
+                let spans = take_spans(game);
+                assert_eq!(
+                    spans.iter().map(|s| s.start as usize).collect::<Vec<_>>(),
+                    expected
+                        .into_iter()
+                        .map(|i| i * copies.len())
+                        .collect::<Vec<_>>()
+                );
+                assert!(spans.iter().all(
+                    |s| s.id == 0 && s.stage == horizon_shaders::render_stage("BLOCK_ENTITIES")
+                ));
+            }
+            game.pack_ids = None;
+            let bytes = |v: &[Vertex]| bytemuck::cast_slice::<Vertex, u8>(v).to_vec();
+            assert_eq!(bytes(&copies), bytes(&per_copy.vertices), "route vertices");
+            assert_eq!(bytes(&copies), bytes(&plain), "the pack changed the bake");
+            let pixels = |vertices: &[Vertex], spans: &[_]| {
+                entity_pixel_test::render_pack(vertices, spans).expect("software Vulkan pack")
+            };
+            let reference = pixels(&per_copy.vertices, &per_copy_spans);
+            let painted: Vec<_> = reference.iter().filter(|p| p[..3] != [0; 3]).collect();
+            assert!(
+                painted.len() > 20,
+                "the probe pack drew {} pixels",
+                painted.len()
+            );
+            assert!(
+                painted.iter().all(|p| **p == PACK_COLOURS[1]),
+                "gbuffers_block"
+            );
+            let batch = pixels(&copies, &copy_spans);
+            let differing = batch.iter().zip(&reference).filter(|(a, b)| a != b).count();
+            assert_eq!(differing, 0, "batch pixels differ from per-copy ones");
         });
     }
 

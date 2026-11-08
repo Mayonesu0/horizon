@@ -37,4 +37,16 @@ pub trait ModStateServerHost {
     /// `native_transaction_close`, which only `host.transaction` reaches, through its seal.
     #[access(WorldOnly)]
     fn transaction_close(&mut self, seal: TransactionSeal, commit: bool);
+    /// Side: server.
+    /// Asks for `Hooks::scheduled_task` to be called with `token` after `delay_ticks` server
+    /// ticks (`MinecraftServer.tell(new TickTask(getTickCount() + delay, ..))`; 0 and 1 both
+    /// mean the next tick, and a paused server does not advance it). Tasks due together run in
+    /// the order they were scheduled. Only inside a mod's hook; the task belongs to that mod and
+    /// is dropped with the world.
+    #[access(WorldOnly)]
+    fn schedule_task(&mut self, delay_ticks: u32, token: u64) -> Result<TaskId, ScheduleError>;
+    /// Side: server.
+    /// Withdraws a task the calling mod scheduled: true if it was still waiting.
+    #[access(WorldOnly)]
+    fn cancel_task(&mut self, id: TaskId) -> bool;
 }

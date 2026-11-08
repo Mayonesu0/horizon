@@ -322,12 +322,28 @@ impl Game<'_> {
             first_person: self.camera_type.is_first_person(),
             scoping: self.scoping(),
             game_time_delta: 0.0,
-            equipment: match &self.armor[0] {
-                Some(stack) if &*stack.item == "minecraft:carved_pumpkin" => {
-                    vec!["misc/pumpkinblur".to_owned()]
+            equipment: [
+                (self.inventory[self.selected].as_ref(), "mainhand"),
+                (self.armor[3].as_ref(), "feet"),
+                (self.armor[2].as_ref(), "legs"),
+                (self.armor[1].as_ref(), "chest"),
+                (self.armor[0].as_ref(), "head"),
+                (self.offhand.as_ref(), "offhand"),
+            ]
+            .into_iter()
+            .filter_map(|(stack, slot)| {
+                let e = horizon_client::item_sync::equippable(stack?, self.res.items())?;
+                if e.slot != slot {
+                    return None;
                 }
-                _ => Vec::new(),
-            },
+                let overlay = e.camera_overlay?;
+                Some(
+                    overlay
+                        .strip_prefix("minecraft:")
+                        .map_or_else(|| overlay.clone(), str::to_owned),
+                )
+            })
+            .collect(),
             ticks_frozen: p.ticks_frozen,
             percent_frozen: p.percent_frozen(),
             partial,

@@ -14,12 +14,8 @@ use horizon_core::{
 /// A new projectile entity's own random: vanilla seeds every entity's random
 /// unpredictably, and a projectile's spread (and an arrow's base damage) come
 /// from it, never from the shooter's random.
-pub fn own_random(shooter: &crate::mobs::Mob) -> horizon_core::random::LegacyRandom {
-    horizon_core::random::LegacyRandom::new(
-        i64::from(shooter.id).wrapping_mul(0x9E37_79B9)
-            ^ i64::from(shooter.age)
-            ^ shooter.position.x.to_bits() as i64,
-    )
+pub fn own_random(_shooter: &crate::mobs::Mob) -> horizon_core::random::LegacyRandom {
+    crate::random_source::entity()
 }
 
 /// A projectile's `Entity.random`. Two projectiles are equal whatever their
@@ -34,31 +30,10 @@ impl PartialEq for OwnRandom {
 }
 
 /// `RandomSource.create()` for a new entity's random: `seedUniquifier ^
-/// nanoTime`. Every call steps a process-wide uniquifier (as `Random`'s) and
-/// mixes the position in through a splitmix64 finalizer, so two entities made
-/// at one spot get independent streams. Draws nothing from any level random.
-pub fn unique_random(position: Vec3) -> horizon_core::random::LegacyRandom {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static UNIQUIFIER: AtomicI64 = AtomicI64::new(0x1F3D_5B79_A2C4_E681);
-    const STEP: i64 = 1_181_783_497_276_652_981;
-    let mut current = UNIQUIFIER.load(Ordering::Relaxed);
-    let step = loop {
-        let next = current
-            .wrapping_mul(STEP)
-            .wrapping_add(0x9E37_79B9_7F4A_7C15_u64 as i64);
-        match UNIQUIFIER.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
-        {
-            Ok(_) => break next,
-            Err(actual) => current = actual,
-        }
-    };
-    let mut z = (step as u64)
-        ^ position.x.to_bits()
-        ^ position.y.to_bits().rotate_left(21)
-        ^ position.z.to_bits().rotate_left(42);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    horizon_core::random::LegacyRandom::new((z ^ (z >> 31)) as i64)
+/// nanoTime`, shared with the other entity constructors. Draws nothing from
+/// any level random.
+pub fn unique_random(_position: Vec3) -> horizon_core::random::LegacyRandom {
+    crate::random_source::entity()
 }
 
 /// `ProjectileDeflection`: how a projectile's movement turns.
@@ -1185,9 +1160,9 @@ impl Projectile {
         let inertia = f64::from(match self.kind {
             ProjectileKind::WitherSkull { dangerous: true } => 0.73_f32,
             // AbstractWindCharge.getInertia and getLiquidInertia.
-            ProjectileKind::WindCharge | ProjectileKind::BreezeWindCharge => 1.0,
-            _ if water => 0.8,
-            _ => 0.95,
+            ProjectileKind::WindCharge | ProjectileKind::BreezeWindCharge => 1.0_f32,
+            _ if water => 0.8_f32,
+            _ => 0.95_f32,
         });
         let v = self.velocity;
         let len = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt().max(1.0e-9);
@@ -1458,10 +1433,12 @@ impl Projectile {
                 return (false, Hit::None);
             }
             self.position = to;
+            // LlamaSpit.getAirDrag is 0.99F, widened before it scales motion.
+            let drag = f64::from(0.99_f32);
             self.velocity = Vec3::new(
-                self.velocity.x * 0.99,
-                self.velocity.y * 0.99 - self.get_gravity(),
-                self.velocity.z * 0.99,
+                self.velocity.x * drag,
+                self.velocity.y * drag - self.get_gravity(),
+                self.velocity.z * drag,
             );
             self.update_rotation();
             return (self.position.y > -128.0 && self.age < 6000, spit_hit);
@@ -1684,8 +1661,8 @@ mod tests {
         p.tick(&w);
         // ThrowableProjectile: gravity before inertia, then move.
         // `getAirDrag` is 0.99F, widened to double: 0.9900000095367432.
-        assert!((p.velocity.y - (-0.03 * 0.99)).abs() < 1e-9);
-        assert!((p.position.x - f64::from(0.99_f32)).abs() < 1e-9);
+        assert_eq!(p.velocity.y.to_bits(), 0xbf9e_69ad_47ae_147b);
+        assert_eq!(p.position.x.to_bits(), 0x3fef_ae14_8000_0000);
     }
     /// One fire block in the cell (0, 99, 0), open air around it: a throwable
     /// inside that cell is set alight, and one that has left it burns down.
@@ -2095,7 +2072,7 @@ mod tests {
         let (keep, _) = p.tick(&w);
         assert!(keep);
         assert!((p.position.x - 1.0).abs() < 1e-9);
-        assert!((p.velocity.x - 0.99).abs() < 1e-9);
+        assert_eq!(p.velocity.x.to_bits(), 0x3fef_ae14_8000_0000);
         assert!((p.velocity.y + 0.06).abs() < 1e-9);
     }
     #[test]

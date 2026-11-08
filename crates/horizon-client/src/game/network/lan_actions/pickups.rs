@@ -172,7 +172,8 @@ impl Game<'_> {
             return;
         };
         let g = &host.hub.guests[gi];
-        let height = f64::from(g.dimensions().height);
+        let own = g.bounds();
+        let vehicle = g.vehicle;
         let (conn, id, at, player, name) =
             (g.conn, g.entity_id, g.position, g.uuid, g.name.clone());
         let unable = g.spectator() || g.dead || g.health <= 0.0;
@@ -190,9 +191,21 @@ impl Game<'_> {
         if unable || delayed {
             return;
         }
+        let area = match vehicle.and_then(|v| self.guest_target_box(gi, v as i32)) {
+            Some(vehicle) => own.union_bounds(vehicle).inflate(Vec3::new(1.0, 0.0, 1.0)),
+            None => own.inflate(Vec3::new(1.0, 0.5, 1.0)),
+        };
         let (min, max) = (
-            [at[0] - 1.3, at[1] - 0.5, at[2] - 1.3],
-            [at[0] + 1.3, at[1] + height + 0.5, at[2] + 1.3],
+            [
+                area.min_position().x,
+                area.min_position().y,
+                area.min_position().z,
+            ],
+            [
+                area.max_position().x,
+                area.max_position().y,
+                area.max_position().z,
+            ],
         );
         let touching: Vec<usize> = self
             .orbs

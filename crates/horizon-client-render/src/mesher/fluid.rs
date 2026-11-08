@@ -251,11 +251,18 @@ pub(super) fn tesselate(
     if !render_up && !render_down && !sides.iter().any(|&s| s) {
         return;
     }
-    let water = matches!(kind, FluidKind::Water | FluidKind::FlowingWater);
-    let tint = if water {
-        water_color & 0xFF_FFFF
-    } else {
-        0xFF_FFFF
+    // A mod's fluid draws as water does, with the sprites and tint of its own model.
+    let model = kind
+        .mod_fluid()
+        .and_then(|fluid| tables.mod_fluids.get(fluid.index()).copied().flatten());
+    let water = matches!(
+        kind,
+        FluidKind::Water | FluidKind::FlowingWater | FluidKind::Mod(_) | FluidKind::ModFlowing(_)
+    );
+    let tint = match model.and_then(|model| model.tint) {
+        Some(tint) => tint,
+        None if water => water_color & 0xFF_FFFF,
+        None => 0xFF_FFFF,
     };
     let emission = if water {
         0
@@ -331,7 +338,9 @@ pub(super) fn tesselate(
             lighting::coords_at(pad, lighting::state_at(pad, info, above), above),
         ))
     };
-    let (still, flow, overlay) = if water {
+    let (still, flow, overlay) = if let Some(model) = model {
+        (model.still, model.flow, model.overlay)
+    } else if water {
         (
             tables.water_still,
             tables.water_flow,
@@ -503,6 +512,133 @@ pub(super) fn tesselate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fluid_models_emit_distinct_layers_and_stale_tables_fall_back() {
+        use super::super::{ModFluidLayers, Tint, mod_tint::ModTints};
+        use horizon_world::fluid::{ModFluidRules, ModFluidType, register_mod_fluid};
+        let fluid = register_mod_fluid(ModFluidType {
+            id: "mesh_fixture:oil".into(),
+            flowing_id: "mesh_fixture:flowing_oil".into(),
+            bucket: None,
+            rules: ModFluidRules {
+                tick_delay: 5,
+                drop_off: 1,
+                slope_find_distance: 4,
+                converts_to_source: false,
+            },
+        })
+        .unwrap();
+        let air = Info {
+            solid: false,
+            full: false,
+            permeable: true,
+            shade: 1.0,
+            emission: 0,
+            tier: 0,
+            emissive: false,
+            fluid: FluidState::EMPTY,
+            model: false,
+            block_entity: false,
+            tints: [Tint::None; 2],
+            tint_count: 0,
+            offset: None,
+            legacy_solid: false,
+            overlay: false,
+            leaves: false,
+            pane: false,
+            opaque_cube: false,
+            blocks_flow: false,
+            ice: false,
+            opaque_ice: false,
+            sturdy: 0,
+            face: [0; 6],
+            cover: [0.0; 6],
+        };
+        let mut tables = MeshTables {
+            info: vec![
+                air,
+                air,
+                Info {
+                    overlay: true,
+                    ..air
+                },
+            ],
+            solid: vec![],
+            full_faces: vec![],
+            visibility: horizon_world::block_render::FaceVisibility::empty(),
+            water_still: 11,
+            water_flow: 12,
+            water_overlay: 13,
+            lava_still: 21,
+            lava_flow: 22,
+            mod_fluids: vec![None; fluid.index() + 1],
+            animated_layers: vec![],
+            mod_tints: ModTints::default(),
+        };
+        let mut pad = Padded {
+            blocks: vec![0; super::super::P.pow(3)],
+            light: vec![0xF0; super::super::P.pow(3)],
+        };
+        pad.blocks[pi(0, 0, 0)] = 1;
+        pad.blocks[pi(1, 0, 0)] = 2; // glass-like neighbour selects overlay
+        let model = ModFluidLayers {
+            still: 31,
+            flow: 32,
+            overlay: Some(33),
+            tint: Some(0xFF0000),
+        };
+        for kind in [FluidKind::Mod(fluid), FluidKind::Water, FluidKind::Lava] {
+            tables.info[1].fluid = FluidState::new(kind, 8, false);
+            tables.mod_fluids[fluid.index()] = Some(model);
+            let mut mesh = SectionMesh::default();
+            tesselate(
+                &tables,
+                (false, false, true, false),
+                &pad,
+                0x00FF00,
+                &mut mesh,
+                [0, 0, 0],
+            );
+            let (vertices, expected) = if kind == FluidKind::Lava {
+                assert!(mesh.translucent.is_empty());
+                (&mesh.solid, vec![21, 22])
+            } else {
+                assert!(mesh.solid.is_empty());
+                (
+                    &mesh.translucent,
+                    if kind == FluidKind::Water {
+                        vec![11, 12, 13]
+                    } else {
+                        vec![31, 32, 33]
+                    },
+                )
+            };
+            let mut layers: Vec<_> = vertices.iter().map(|v| v.layer).collect();
+            layers.sort_unstable();
+            layers.dedup();
+            assert_eq!(layers, expected);
+            assert!(!vertices.is_empty());
+            if kind == FluidKind::Mod(fluid) {
+                assert_eq!(vertices[0].color & 0xFFFFFF, 0x0000FF); // packed red
+            }
+        }
+        tables.info[1].fluid = FluidState::new(FluidKind::Mod(fluid), 8, false);
+        tables.mod_fluids.clear();
+        let mut mesh = SectionMesh::default();
+        tesselate(
+            &tables,
+            (false, false, true, false),
+            &pad,
+            0x00FF00,
+            &mut mesh,
+            [0, 0, 0],
+        );
+        let mut layers: Vec<_> = mesh.translucent.iter().map(|v| v.layer).collect();
+        layers.sort_unstable();
+        layers.dedup();
+        assert_eq!(layers, vec![11, 12, 13]);
+    }
+
     #[test]
     fn atan2_follows_the_table_approximation() {
         for (y, x) in [

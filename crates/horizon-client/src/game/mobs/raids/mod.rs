@@ -13,6 +13,7 @@ use horizon_client::{
     },
     patrol::{GameplayAttributes, Member, PatrolLevel, PatrolSpawner},
     raid::{self, Action, BarName, RaidLevel, RaidPlayer, RaiderInfo, RaiderType, Raids, Spawn},
+    random_source,
 };
 use horizon_core::nbt::Tag;
 use horizon_core::{geometry::Vec3, random::RandomSource};
@@ -153,6 +154,9 @@ struct PatrolCx<'a, 'g, 'h> {
     can_spawn: &'h dyn Fn(&Game, [i32; 3]) -> bool,
 }
 impl SpawnLevel for PatrolCx<'_, '_, '_> {
+    fn within_world_border(&self, x: i32, z: i32) -> bool {
+        self.level.within_world_border(x, z)
+    }
     fn state(&self, x: i32, y: i32, z: i32) -> horizon_world::registry::BlockStateId {
         self.level.state(x, y, z)
     }
@@ -189,8 +193,8 @@ impl SpawnLevel for PatrolCx<'_, '_, '_> {
     fn peaceful(&self) -> bool {
         self.level.peaceful()
     }
-    fn dimension(&self) -> spawn_rules::Dimension {
-        self.level.dimension()
+    fn dimension_type(&self) -> &horizon_world::dimension_type::DimensionFacts {
+        self.level.dimension_type()
     }
     fn surface_slime_chance(&self, x: i32, y: i32, z: i32) -> f32 {
         self.level.surface_slime_chance(x, y, z)
@@ -211,7 +215,7 @@ impl PatrolLevel for PatrolCx<'_, '_, '_> {
             .bool_at(horizon_client::gamerules::vanilla::SPAWN_PATROLS)
     }
     fn bright_outside(&self) -> bool {
-        self.level.game.dim == Dim::Overworld && self.level.game.sky_darken() < 4
+        !self.level.game.dimension_type().has_fixed_time && self.level.game.sky_darken() < 4
     }
     /// `PatrolSpawner.tick` picks from `level.players()`: the local player
     /// and every guest in the level.
@@ -298,14 +302,14 @@ impl Game<'_> {
     fn load_raids(&mut self) {
         self.read_raids();
         if let Some(order) = self.raiding.unseeded.take() {
-            let seed = self.world.random.next_long();
+            let seed = random_source::unique_seed();
             self.raiding.raids.seed_loaded(seed, &order);
         }
     }
     /// Reads the raids of the player's dimension from its file (the previous
     /// dimension's saved first), as a level opens (`ServerLevel`'s
-    /// constructor). Their randoms are seeded by `load_raids` on the first
-    /// raid tick, at the same point in the world random as before.
+    /// constructor). Their own randoms are seeded by `load_raids` on the first
+    /// raid tick without drawing from the level's stream.
     pub(super) fn read_raids(&mut self) {
         if self.raiding.loaded == Some(self.dim) {
             return;
@@ -408,7 +412,7 @@ impl Game<'_> {
                     .clone()
             })
             .unwrap_or_default();
-        attributes.value(key, self.dim.id(), &biome, self.world.day_time)
+        attributes.value(key, &self.dimension_type().id, &biome, self.world.day_time)
     }
 
     /// `BadOmenMobEffect` and `RaidOmenMobEffect.applyEffectTick` for the
@@ -477,7 +481,8 @@ impl Game<'_> {
         }
         self.load_raids();
         let center = raid::raid_center(at, &self.village_pois());
-        let seed = self.world.random.next_long();
+        // The new raid's own random: `RandomSource.create()`, not the level's.
+        let seed = random_source::unique_seed();
         let difficulty = self.difficulty_id();
         let (id, triggered) = self
             .raiding

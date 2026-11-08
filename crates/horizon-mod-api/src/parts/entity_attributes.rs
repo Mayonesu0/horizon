@@ -20,6 +20,27 @@ pub struct EntityAttributeDeclaration {
 pub fn entity_attribute_declarations() -> &'static [EntityAttributeDeclaration] {
     installed().map_or(&[], |installed| &installed.entity_attributes)
 }
+
+/// Attributes a mod adds to an existing entity type's default set (NeoForge's
+/// `EntityAttributeModificationEvent`): the type (`minecraft:zombie`) and each
+/// attribute's id with its base, or none for the attribute's own default (the
+/// event's one-argument `add`). The game puts them on the type's attribute row
+/// once, at load, after every declared set, so new entities of the type have
+/// them; live entities are not edited.
+#[derive(Clone, Debug, PartialEq)]
+// exhaustive: only registration builds it; the game reads it
+pub struct EntityAttributeModification {
+    /// The entity type whose default set grows.
+    pub entity: String,
+    /// Each attribute's id (`minecraft:luck`) and its base, if not the default.
+    pub attributes: Vec<(String, Option<f64>)>,
+}
+
+/// The attribute additions mods made to existing entity types, in
+/// registration order.
+pub fn entity_attribute_modifications() -> &'static [EntityAttributeModification] {
+    installed().map_or(&[], |installed| &installed.entity_attribute_modifications)
+}
 /// Fixtures that tests of other crates use to install Parts.
 #[cfg(any(test, feature = "testing"))]
 pub mod tests {
@@ -79,6 +100,68 @@ pub mod tests {
                 .all(|refusal| refusal.contains("mod ruby"))
         );
     }
+
+    /// Additions to existing types (#846, `EntityAttributeModificationEvent`)
+    /// reach any namespace, may repeat a type, and validate each call's set.
+    #[test]
+    pub(crate) fn entity_attribute_modifications_validate_each_set() {
+        let mut registrar = super::PartRegistrar::new("ruby");
+        // A vanilla type, by bare name or full id, and the same type again.
+        registrar
+            .modify_entity_attributes("zombie", vec![("minecraft:luck".to_string(), Some(2.0))])
+            .unwrap();
+        registrar
+            .modify_entity_attributes(
+                "minecraft:zombie",
+                vec![("minecraft:follow_range".to_string(), None)],
+            )
+            .unwrap();
+        // Another mod's type is fine too.
+        registrar
+            .modify_entity_attributes("other:ghoul", vec![])
+            .unwrap();
+        assert_eq!(
+            registrar.modify_entity_attributes("Not An Id", vec![]),
+            Err(EntityAttributeError::InvalidId)
+        );
+        assert_eq!(
+            registrar.modify_entity_attributes(
+                "minecraft:skeleton",
+                vec![
+                    ("minecraft:luck".to_string(), None),
+                    ("minecraft:luck".to_string(), Some(1.0)),
+                ]
+            ),
+            Err(EntityAttributeError::DuplicateAttribute)
+        );
+        assert_eq!(
+            registrar.modify_entity_attributes(
+                "minecraft:skeleton",
+                vec![("minecraft:luck".to_string(), Some(f64::INFINITY))]
+            ),
+            Err(EntityAttributeError::NotFinite)
+        );
+        let entities: Vec<_> = registrar
+            .entity_attribute_modifications
+            .iter()
+            .map(|m| m.entity.as_str())
+            .collect();
+        assert_eq!(
+            entities,
+            ["minecraft:zombie", "minecraft:zombie", "other:ghoul"]
+        );
+        assert_eq!(
+            registrar.entity_attribute_modifications[1].attributes,
+            [("minecraft:follow_range".to_string(), None)]
+        );
+        assert_eq!(registrar.refused.len(), 3);
+        assert!(
+            registrar
+                .refused
+                .iter()
+                .all(|refusal| refusal.contains("mod ruby"))
+        );
+    }
 }
 
 /// Registrar operations for entity attributes.
@@ -103,6 +186,32 @@ pub trait EntityAttributesRegistrar {
         template: &str,
         attributes: Vec<(String, f64)>,
     ) -> Result<(), crate::EntityAttributeError>;
+
+    /// Add attributes to an existing entity type's default set (NeoForge's
+    /// `EntityAttributeModificationEvent`): `entity` is any type with an
+    /// attribute row (`minecraft:zombie`; a bare name is in `minecraft`): a
+    /// vanilla type, or a mod's type with a declared set. A living type that
+    /// only a content file defines has no row of its own yet; declare its set
+    /// with [`declare_entity_attributes`](Self::declare_entity_attributes)
+    /// first, and the additions apply on top of it. Each attribute's id
+    /// (`minecraft:luck`) takes its base, or with none the attribute's own
+    /// default, as the event's one-argument `add`. An attribute the type
+    /// already has takes the new base. The change is the type's default:
+    /// entities created after load have it, through their spawn fields, their
+    /// live attribute map and the attribute sync; nothing edits a live entity.
+    ///
+    /// Applied once, at load, after every declared set
+    /// ([`declare_entity_attributes`](Self::declare_entity_attributes)), in
+    /// registration order, so a later addition of the same attribute wins.
+    /// An invalid type id, the same attribute twice in one call or a
+    /// non-finite base refuses the mods, naming the mod; an attribute the
+    /// game does not know, or a type without an attribute row, refuses the
+    /// resource load, naming the type.
+    fn modify_entity_attributes(
+        &mut self,
+        entity: &str,
+        attributes: Vec<(String, Option<f64>)>,
+    ) -> Result<(), crate::EntityAttributeError>;
 }
 
 impl EntityAttributesRegistrar for PartRegistrar {
@@ -126,17 +235,7 @@ impl EntityAttributesRegistrar for PartRegistrar {
             if self.entity_attributes.iter().any(|d| d.id == id) {
                 return Err(crate::EntityAttributeError::Duplicate);
             }
-            for (index, (attribute, base)) in attributes.iter().enumerate() {
-                if !base.is_finite() {
-                    return Err(crate::EntityAttributeError::NotFinite);
-                }
-                if attributes[..index]
-                    .iter()
-                    .any(|(other, _)| other == attribute)
-                {
-                    return Err(crate::EntityAttributeError::DuplicateAttribute);
-                }
-            }
+            check_attribute_set(&attributes, |base| Some(*base))?;
             self.entity_attributes.push(EntityAttributeDeclaration {
                 id,
                 template: format!("{template_ns}:{template_name}"),
@@ -152,4 +251,54 @@ impl EntityAttributesRegistrar for PartRegistrar {
         }
         result
     }
+
+    fn modify_entity_attributes(
+        &mut self,
+        entity: &str,
+        attributes: Vec<(String, Option<f64>)>,
+    ) -> Result<(), crate::EntityAttributeError> {
+        let result = (|| {
+            let id = if entity.contains(':') {
+                entity.to_owned()
+            } else {
+                format!("minecraft:{entity}")
+            };
+            if !horizon_mod_package::content::namespaced_id(&id) {
+                return Err(crate::EntityAttributeError::InvalidId);
+            }
+            check_attribute_set(&attributes, |base| *base)?;
+            self.entity_attribute_modifications
+                .push(EntityAttributeModification {
+                    entity: id,
+                    attributes,
+                });
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            self.refused.push(format!(
+                "mod {} entity attribute additions {entity:?}: {error:?}",
+                self.mod_id
+            ));
+        }
+        result
+    }
+}
+
+/// Refuses a set that names an attribute twice or has a non-finite base.
+fn check_attribute_set<B>(
+    attributes: &[(String, B)],
+    base: impl Fn(&B) -> Option<f64>,
+) -> Result<(), crate::EntityAttributeError> {
+    for (index, (attribute, value)) in attributes.iter().enumerate() {
+        if base(value).is_some_and(|base| !base.is_finite()) {
+            return Err(crate::EntityAttributeError::NotFinite);
+        }
+        if attributes[..index]
+            .iter()
+            .any(|(other, _)| other == attribute)
+        {
+            return Err(crate::EntityAttributeError::DuplicateAttribute);
+        }
+    }
+    Ok(())
 }

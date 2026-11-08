@@ -44,7 +44,7 @@ Explicit handle reads can still request an eager owned stack.
 
 | Boundary | Guard and conversion | Component-lazy? |
 | --- | --- | --- |
-| `inventory_tick` (carried, armour and offhand slots) | Global subscriber guard; payload is only slot and selected flag. No stack conversion. The caller borrows the engine slot to check presence. | No implicit component read; an explicit stack read is eager. |
+| `inventory_tick` (carried, armour and offhand slots) | Scoped `item` hook: no engine stack is cloned unless a part subscribes to the hook, and parts are looked up by the stack's item. Payload is the stack, the slot and the selected flag. | No implicit component read; an explicit stack read is eager. |
 | `player_tick_pre/post`, `entity_tick_pre/post` (including item entities) | Subscriber dispatch; identity/scalar payload only. No stack conversion. | No implicit component read; an explicit stack read is eager. |
 | `living_entity_use_item_tick`, `on_use_tick` | Global/Part guard respectively in generated fire, before converting the held stack. | **No.** Subscribed component-bearing stacks are eager. |
 | `item_after_vertical_collision` | Block Part guard before converting the item entity's stack; runs on a vertical collision, potentially each grounded tick. `None` consumes the item; invalid replacement preserves the original. | **No.** |

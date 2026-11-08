@@ -29,13 +29,15 @@ pub struct Catalog {
     ids: BTreeMap<String, AttributeId>,
     defaults: BTreeMap<String, Arc<[Option<f64>]>>,
 }
-/// A row `Catalog::with_entity_row` refused: an override names an attribute
-/// the catalog does not know, or the template has no row of its own.
+/// A row `Catalog::with_entity_row` or `Catalog::with_entity_additions`
+/// refused: an override names an attribute the catalog does not know, or the
+/// template (or, for additions, the entity type itself) has no row of its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EntityRowError {
     UnknownAttribute { entity: String, attribute: String },
     UnknownTemplate { entity: String, template: String },
+    UnknownEntity { entity: String },
 }
 impl fmt::Display for EntityRowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -47,6 +49,12 @@ impl fmt::Display for EntityRowError {
                 write!(
                     f,
                     "entity {entity} copies {template}, which has no attribute row"
+                )
+            }
+            Self::UnknownEntity { entity } => {
+                write!(
+                    f,
+                    "entity {entity} has no attribute row to add to (a mod's type needs a declared set first)"
                 )
             }
         }
@@ -156,14 +164,52 @@ impl Catalog {
         template: &str,
         overrides: &[(String, f64)],
     ) -> Result<Catalog, EntityRowError> {
-        let mut bases = self
+        let start = self
             .defaults
             .get(template)
             .ok_or_else(|| EntityRowError::UnknownTemplate {
                 entity: entity.to_owned(),
                 template: template.to_owned(),
-            })?
-            .to_vec();
+            })?;
+        self.with_bases(
+            entity,
+            start,
+            overrides.iter().map(|(name, base)| (name, Some(*base))),
+        )
+    }
+    /// A copy of the catalog with attributes added to `entity`'s own supplier
+    /// (NeoForge's `EntityAttributeModificationEvent`, whose `add` puts an
+    /// attribute on an existing type's `AttributeSupplier.Builder`): each
+    /// named attribute takes its base, or the attribute's own default with
+    /// none (the one-argument `add`), whether the row had it or not. The rest
+    /// of the row stays. An attribute the catalog does not know, or an entity
+    /// type without a row, refuses, naming the entity.
+    pub fn with_entity_additions(
+        &self,
+        entity: &str,
+        additions: &[(String, Option<f64>)],
+    ) -> Result<Catalog, EntityRowError> {
+        let start = self
+            .defaults
+            .get(entity)
+            .ok_or_else(|| EntityRowError::UnknownEntity {
+                entity: entity.to_owned(),
+            })?;
+        self.with_bases(
+            entity,
+            start,
+            additions.iter().map(|(name, base)| (name, *base)),
+        )
+    }
+    /// A copy of the catalog whose `entity` row is `start` with `overrides`
+    /// on top; an override without a base takes the attribute's default.
+    fn with_bases<'a>(
+        &self,
+        entity: &str,
+        start: &[Option<f64>],
+        overrides: impl Iterator<Item = (&'a String, Option<f64>)>,
+    ) -> Result<Catalog, EntityRowError> {
+        let mut bases = start.to_vec();
         for (name, base) in overrides {
             let Some(id) = self.ids.get(name.as_str()) else {
                 return Err(EntityRowError::UnknownAttribute {
@@ -171,7 +217,8 @@ impl Catalog {
                     attribute: name.clone(),
                 });
             };
-            bases[id.0] = Some(*base);
+            let default = self.attributes[id.0].definition.default_value();
+            bases[id.0] = Some(base.unwrap_or(default));
         }
         let mut defaults = self.defaults.clone();
         defaults.insert(entity.to_owned(), Arc::from(bases));
@@ -359,7 +406,9 @@ mod row_tests {
             "data_version": DATA_VERSION,
             "attributes": [
                 {"id": "minecraft:max_health", "default": bits(20.0), "min": bits(1.0), "max": bits(1024.0), "syncable": true},
-                {"id": "minecraft:armor", "default": bits(0.0), "min": bits(0.0), "max": bits(30.0), "syncable": true}
+                {"id": "minecraft:armor", "default": bits(0.0), "min": bits(0.0), "max": bits(30.0), "syncable": true},
+                {"id": "minecraft:luck", "default": bits(0.0), "min": bits(-1024.0), "max": bits(1024.0), "syncable": true},
+                {"id": "minecraft:follow_range", "default": bits(32.0), "min": bits(0.0), "max": bits(2048.0), "syncable": false}
             ],
             "entities": {
                 "minecraft:zombie": {"minecraft:max_health": bits(20.0), "minecraft:armor": bits(2.0)}
@@ -428,5 +477,62 @@ mod row_tests {
             .into()
         );
         assert_eq!(merged.entity_row("missing:entity"), None);
+    }
+
+    /// Additions put attributes on a type's own row
+    /// (`EntityAttributeModificationEvent.add`, #846): one it lacks joins the
+    /// row, with its base or the attribute's default; one it has takes the
+    /// new base; the rest of the row stays.
+    #[test]
+    fn additions_extend_a_types_own_row() {
+        let catalog = catalog();
+        let added = catalog
+            .with_entity_additions(
+                "minecraft:zombie",
+                &[
+                    ("minecraft:luck".into(), Some(3.5)),
+                    ("minecraft:follow_range".into(), None),
+                    ("minecraft:armor".into(), Some(4.0)),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            added.entity_row("minecraft:zombie").unwrap(),
+            [
+                ("minecraft:max_health".to_owned(), 20.0),
+                ("minecraft:armor".to_owned(), 4.0),
+                ("minecraft:luck".to_owned(), 3.5),
+                ("minecraft:follow_range".to_owned(), 32.0),
+            ]
+            .into()
+        );
+        // A new map of the type has the added attribute.
+        let mut live = Arc::new(added).create("minecraft:zombie").unwrap();
+        let luck = catalog.id("minecraft:luck").unwrap();
+        assert_eq!(live.value(luck).unwrap(), 3.5);
+        // The catalog itself keeps what it had.
+        assert_eq!(catalog.default_base("minecraft:zombie", luck), None);
+    }
+
+    #[test]
+    fn additions_refuse_unknown_attributes_and_types_without_a_row() {
+        let catalog = catalog();
+        assert_eq!(
+            catalog
+                .with_entity_additions("minecraft:zombie", &[("missing:attribute".into(), None)])
+                .err(),
+            Some(EntityRowError::UnknownAttribute {
+                entity: "minecraft:zombie".into(),
+                attribute: "missing:attribute".into(),
+            })
+        );
+        assert_eq!(
+            catalog
+                .with_entity_additions("minecraft:pig", &[("minecraft:luck".into(), None)])
+                .err(),
+            Some(EntityRowError::UnknownEntity {
+                entity: "minecraft:pig".into(),
+            })
+        );
     }
 }

@@ -66,12 +66,18 @@ impl DamageWorld for World<'_> {
         self.query(&format!("armor {:08x}", f32_bits(v)))?;
         Ok(single(&self.state()["armor"]))
     }
+    fn bypasses_armor(&mut self) -> io::Result<bool> {
+        unreachable!("the oracle registers no reduction modifier")
+    }
     fn after_magic(&mut self, v: f32) -> io::Result<MagicAbsorb> {
         self.query(&format!("magic {:08x}", f32_bits(v)))?;
         // The oracle answers the whole step; the split only names the reductions.
         Ok(MagicAbsorb {
             damage: single(&self.state()["magic"]),
             mob_effects: 0.0,
+            resisted: false,
+            after_effects: 0.0,
+            protection: None,
         })
     }
     fn absorption(&mut self) -> io::Result<f32> {

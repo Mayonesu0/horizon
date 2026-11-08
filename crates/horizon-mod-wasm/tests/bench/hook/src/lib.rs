@@ -86,6 +86,9 @@ impl mod_api::BlockEntityPart for Counter {
             .insert("counter".into(), mod_api::Tag::Int(17));
         event.entity.data = vec![23];
         event.entity.items.clear();
+        event
+            .entity
+            .set_client_update_fields([("effect".into(), mod_api::Tag::Int(29))].into());
     }
 }
 

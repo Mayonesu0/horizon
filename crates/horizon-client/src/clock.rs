@@ -440,11 +440,19 @@ impl FixedStep {
     /// `TickRateManager.tick` for one tick, then whether the world runs
     /// (`runsNormally`). Also the sprint check that opens a sprint tick.
     pub fn world_runs(&mut self) -> bool {
+        self.check_sprint_completion();
+        self.tick_world_runs()
+    }
+    /// Discover natural sprint completion before listeners and the tick-rate decision.
+    pub fn check_sprint_completion(&mut self) {
         // MinecraftServer checks for a finished sprint before tickServer
         // asks the tick-rate manager whether the levels should run.
         if self.manager.is_sprinting() && self.manager.remaining_sprint_ticks() == 0 {
             self.sprint_report = Some(self.manager.finish_tick_sprint());
         }
+    }
+    /// Tick-rate decision after the server has dispatched any sprint-completion listener.
+    pub fn tick_world_runs(&mut self) -> bool {
         self.manager.base.tick();
         self.sprint_checked = false;
         if self.manager.is_sprinting() {

@@ -4,7 +4,12 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{Game, execution_role::ExecutionRole};
+use super::{
+    Game,
+    execution_role::ExecutionRole,
+    scheduled_tasks::{ScheduledTasks, run_all},
+};
+use mod_api::{ScheduleError, TaskId};
 // Their old home, for mixin code that names them here.
 pub(super) use mod_api::{
     NativeAuthority, NativeLifecycleContext, NativeTickId, NativeWorldEpoch, ServerTickPhase,
@@ -61,6 +66,8 @@ impl OpenAttempt {
 pub(super) struct NativeLifecycle {
     attempt: Option<OpenAttempt>,
     read_scope: bool,
+    /// The mods' delayed tasks (`schedule_task`): dropped whenever a world opens or closes.
+    tasks: ScheduledTasks,
 }
 
 impl NativeLifecycle {
@@ -82,6 +89,7 @@ impl NativeLifecycle {
     /// The open starts: a fresh process-wide epoch, never reused.
     pub(super) fn begin_open(&mut self, authority: NativeAuthority) {
         let epoch = fresh_epoch().get();
+        self.tasks.clear();
         self.attempt = Some(OpenAttempt {
             authority,
             epoch,
@@ -109,6 +117,7 @@ impl NativeLifecycle {
         }
         let context = attempt.server_context();
         self.attempt = None;
+        self.tasks.clear();
         context
     }
 
@@ -126,6 +135,7 @@ impl NativeLifecycle {
         }
         let context = attempt.server_context();
         self.attempt = None;
+        self.tasks.clear();
         context
     }
 
@@ -137,6 +147,7 @@ impl NativeLifecycle {
         }
         let context = attempt.server_context();
         self.attempt = None;
+        self.tasks.clear();
         context
     }
 
@@ -151,6 +162,8 @@ impl NativeLifecycle {
             return None;
         }
         attempt.ticks += 1;
+        // "Now" for the mods' delayed tasks moves before any hook of this tick runs.
+        self.tasks.begin_tick();
         attempt.tick_open = true;
         attempt.tick_world_running = world_running;
         Some((
@@ -256,8 +269,36 @@ impl Game<'_> {
         if let Some((context, phase)) = self.native_lifecycle.server_tick_start(world_running) {
             self.native_lifecycle.read_scope = true;
             self.native_server_tick(&context, phase);
+            // Tasks come due after the start phase, still inside the tick's read scope. One that
+            // panics does not drop the others; its panic goes on once the scope is restored.
+            let panic = run_all(
+                self,
+                |game| game.native_lifecycle.tasks.pop_due(),
+                |game, (id, owner, token)| game.native_scheduled_task(id, owner, token),
+            );
             self.native_lifecycle.read_scope = false;
+            if let Some(payload) = panic {
+                std::panic::resume_unwind(payload);
+            }
         }
+    }
+
+    /// `schedule_task`: a delayed call to `scheduled_task` for the mod whose hook is running.
+    pub(in crate::game) fn schedule_task(
+        &mut self,
+        delay_ticks: u32,
+        token: u64,
+    ) -> Result<TaskId, ScheduleError> {
+        let owner = mod_api::crash::current_native_mod();
+        self.native_lifecycle
+            .tasks
+            .schedule(owner, delay_ticks, token)
+    }
+
+    /// `cancel_task`: withdraws a task the running mod scheduled.
+    pub(in crate::game) fn cancel_task(&mut self, id: TaskId) -> bool {
+        let owner = mod_api::crash::current_native_mod();
+        self.native_lifecycle.tasks.cancel(owner, id)
     }
 
     /// An errored tick returned at `result?` before this site.
@@ -326,6 +367,41 @@ mod tests {
             observed += usize::from(running);
         }
         assert_eq!(observed, 4);
+    }
+
+    /// A task a mod schedules from the tick's start hook (after `server_tick_start` moved "now")
+    /// fires on a later tick: delay 0 and 1 on the next, delay N on the Nth after this one. A
+    /// paused pass moves nothing, and closing the world drops what waits.
+    #[test]
+    fn tasks_scheduled_from_the_start_hook_fire_on_a_later_tick() {
+        let owner = Some("mymod");
+        let mut lifecycle = opening();
+        lifecycle.world_open_ready();
+        let mut fired = Vec::new();
+        for tick in 1..=6u64 {
+            assert!(lifecycle.server_tick_start(true).is_some());
+            // The start hook runs here: it schedules on the first tick only.
+            if tick == 1 {
+                for (delay, token) in [(0, 100), (1, 101), (3, 103)] {
+                    lifecycle.tasks.schedule(owner, delay, token).unwrap();
+                }
+            }
+            while let Some((_, _, token)) = lifecycle.tasks.pop_due() {
+                fired.push((tick, token));
+            }
+            lifecycle.server_tick_end(false);
+        }
+        assert_eq!(fired, [(2, 100), (2, 101), (4, 103)]);
+
+        lifecycle.tasks.schedule(owner, 1, 1).unwrap();
+        assert!(lifecycle.server_tick_end(true).is_none());
+        assert!(lifecycle.tasks.pop_due().is_none());
+        lifecycle.begin_close();
+        lifecycle.world_close_final();
+        lifecycle.begin_open(NativeAuthority::IntegratedServer);
+        lifecycle.world_open_ready();
+        lifecycle.server_tick_start(true);
+        assert!(lifecycle.tasks.pop_due().is_none());
     }
 
     /// A lifecycle mid-open on the server thread.

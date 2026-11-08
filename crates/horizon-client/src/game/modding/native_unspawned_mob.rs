@@ -44,6 +44,34 @@ struct Lent {
     mob: Option<Mob>,
 }
 
+/// Ends a lend when it drops, after the call or while a listener's panic
+/// unwinds: the lend is withdrawn, so its handle answers `Expired`, and the
+/// lent mob moves back into the caller's slot.
+struct Withdraw<'a, 'g, 'm> {
+    game: &'a Game<'g>,
+    handle: UnspawnedMobRef,
+    slot: Option<&'m mut Mob>,
+}
+
+impl Drop for Withdraw<'_, '_, '_> {
+    fn drop(&mut self) {
+        let lent = {
+            let mut lent = self.game.lent_mobs.borrow_mut();
+            let at = lent.0.iter().rposition(|l| l.handle == self.handle);
+            at.map(|at| lent.0.remove(at))
+        };
+        if let (
+            Some(slot),
+            Some(Lent {
+                mob: Some(back), ..
+            }),
+        ) = (self.slot.take(), lent)
+        {
+            *slot = back;
+        }
+    }
+}
+
 /// The editor a lend hands out: it reaches only the lent copies, through the
 /// game it was made from.
 struct Edits<'a, 'g> {
@@ -54,6 +82,11 @@ impl Game<'_> {
     /// Lends `mob` (or, with `None`, only its `kind` and `position`) to `call`,
     /// then takes it back with whatever the call changed. `call` gets the
     /// handle and the editor; both are dead once it returns.
+    ///
+    /// The mob itself moves into the lend and back, so state a copy leaves
+    /// out (a mod goal's own object) is kept; the caller's slot holds a copy
+    /// meanwhile, which nothing reads. A listener that panics still ends the
+    /// lend and puts the mob back ([`Withdraw`]).
     pub(in crate::game) fn lend_unspawned<R>(
         &self,
         kind: &str,
@@ -63,28 +96,26 @@ impl Game<'_> {
     ) -> R {
         let handle =
             UnspawnedMobRef::new(self.lend_epoch(), NEXT_LEND.fetch_add(1, Ordering::Relaxed));
+        let mob = mob.map(|slot| {
+            let stand_in = slot.clone();
+            (std::mem::replace(slot, stand_in), slot)
+        });
+        let (lent, slot) = match mob {
+            Some((lent, slot)) => (Some(lent), Some(slot)),
+            None => (None, None),
+        };
         self.lent_mobs.borrow_mut().0.push(Lent {
             handle,
             kind: kind.to_owned(),
             position,
-            mob: mob.as_deref().cloned(),
+            mob: lent,
         });
-        let answer = call(handle, &Edits { game: self });
-        let lent = {
-            let mut lent = self.lent_mobs.borrow_mut();
-            let at = lent.0.iter().rposition(|l| l.handle == handle);
-            at.map(|at| lent.0.remove(at))
+        let _withdraw = Withdraw {
+            game: self,
+            handle,
+            slot,
         };
-        if let (
-            Some(out),
-            Some(Lent {
-                mob: Some(back), ..
-            }),
-        ) = (mob, lent)
-        {
-            *out = back;
-        }
-        answer
+        call(handle, &Edits { game: self })
     }
 
     /// The world a lend's handles belong to; a game with none open lends
@@ -769,6 +800,89 @@ mod tests {
             },
         );
         assert_eq!(*given.lock().unwrap(), [None]);
+    }
+
+    /// A mod goal that only names itself: a mob carries it under this name
+    /// while it has its goal, and as `ModGoal` once a copy left it out.
+    struct Kept;
+    impl mod_api::Goal for Kept {
+        fn flags(&self) -> mod_api::GoalFlags {
+            mod_api::GoalFlags::MOVE
+        }
+        fn name(&self) -> &'static str {
+            "Kept"
+        }
+        fn can_use(&mut self, _: &mut mod_api::GoalContext<'_>) -> bool {
+            false
+        }
+    }
+    struct KeptGoal;
+    #[mod_api::horizon_part]
+    impl mod_api::EntityPart for KeptGoal {
+        fn register_goals(&self, goals: &mut mod_api::GoalRegistrar<'_>) {
+            goals.add_goal(7, Kept);
+        }
+    }
+    struct KeptGoalMod;
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for KeptGoalMod {
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            r.entity_part("minecraft:zombie", KeptGoal);
+        }
+    }
+
+    /// A listener that panics still ends its lend: the handle is withdrawn
+    /// and the mob in the caller's slot is the one that was lent, mod goal
+    /// and all, not a copy (whose mod goal would have no goal) or a default.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_panicking_listener_still_ends_the_lend() {
+        let installed = || vec![mod_api::ModEntry::new("kept-goal", Box::new(KeptGoalMod))];
+        mod_api::testing::with_mods(installed().into(), || {
+            with_game(|game| {
+                super::super::api_values::install_parts(&installed()).unwrap();
+                game.resolve_parts().unwrap();
+                let kind = game
+                    .res
+                    .mob_types()
+                    .get("minecraft:zombie")
+                    .unwrap()
+                    .clone();
+                let mut zombie = Mob::new(70, kind, horizon_core::geometry::Vec3::ZERO, 0.0);
+                zombie.custom_name = Some("Lent".to_owned());
+                let goals = |m: &Mob| -> Vec<&'static str> {
+                    m.ai.goals.entries().map(|(_, name, _)| name).collect()
+                };
+                assert!(
+                    goals(&zombie).contains(&"Kept"),
+                    "the part attached its goal"
+                );
+                let mut kept = None;
+                let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    game.lend_unspawned("minecraft:zombie", AT, Some(&mut zombie), |mob, _| {
+                        kept = Some(mob);
+                        panic!("a listener's bug");
+                    })
+                }));
+                assert!(panicked.is_err());
+                assert!(
+                    game.lent_mobs.borrow().0.is_empty(),
+                    "the lend is withdrawn"
+                );
+                let kept = kept.expect("the call ran");
+                assert_eq!(kept.kind(game), Err(UnspawnedMobError::Expired));
+                assert_eq!(zombie.id, 70);
+                assert_eq!(zombie.custom_name.as_deref(), Some("Lent"));
+                let back = goals(&zombie);
+                assert!(
+                    back.contains(&"Kept"),
+                    "the mod goal keeps its goal: {back:?}"
+                );
+                assert!(!back.contains(&"ModGoal"), "no copied mod goal: {back:?}");
+                super::super::api_values::install_parts(&[]).unwrap();
+                game.resolve_parts().unwrap();
+            });
+        });
     }
 
     /// Group data crosses the boundary by the names vanilla saves its

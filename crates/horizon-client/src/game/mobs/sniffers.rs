@@ -30,12 +30,8 @@ impl Game<'_> {
             f64::from(pos[1]) + 0.5,
             f64::from(pos[2]) + 0.5,
         ];
-        if let Some(id) = self.spawn_mob(
-            "minecraft:sniffer",
-            at,
-            true,
-            super::creatures::SpawnSite::Plain,
-        ) && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+        if let Some(id) = self.spawn_mob_raw("minecraft:sniffer", at, true)
+            && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
         {
             m.extra.age = sniffer::BABY_START_AGE;
             let yaw = self.world.random.next_float() * 360.0 - 180.0;

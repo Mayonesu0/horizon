@@ -210,12 +210,8 @@ impl Game<'_> {
             spawning::villager_type(&facts)
         });
         self.mobs[ib].extra.age = 6000;
-        let Some(id) = self.spawn_mob(
-            "minecraft:villager",
-            [from.x, from.y, from.z],
-            true,
-            super::creatures::SpawnSite::Plain,
-        ) else {
+        let Some(id) = self.spawn_mob_raw("minecraft:villager", [from.x, from.y, from.z], true)
+        else {
             return;
         };
         if let Some(child) = self.mobs.iter_mut().find(|m| m.id == id) {
@@ -676,7 +672,7 @@ mod nested_spawn_tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn lifted_mob_callback_keeps_nested_spawns_until_the_next_pass() {
-        crate::game::native_entity_refs::tests::with_game(|game| {
+        crate::game::entity::taken_pass_tests::in_both_dimensions(|game, balance| {
             let kind = game
                 .res
                 .mob_types()
@@ -689,9 +685,13 @@ mod nested_spawn_tests {
                 horizon_core::geometry::Vec3::new(0.5, 80.0, 0.5),
                 0.0,
             ));
-            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(game, |game| {
-                game.wake_villager(99);
-            });
+            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(
+                game,
+                balance,
+                |game| {
+                    game.wake_villager(99);
+                },
+            );
         });
     }
 }

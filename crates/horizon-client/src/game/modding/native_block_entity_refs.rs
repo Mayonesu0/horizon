@@ -399,16 +399,6 @@ impl Game<'_> {
         if !self.load_block_entity_data(key, &merged) {
             return Ok(false);
         }
-        let kept = self.world.block_entities.get(&key);
-        if kept.is_some_and(|kept| {
-            !matches!(kept, BlockEntity::Banner(_) | BlockEntity::Sign(_))
-                && nameable(key, kept, &block)
-        }) {
-            match save::text(merged.get("CustomName")) {
-                Some(name) => self.world.block_names.insert(key, name),
-                None => self.world.block_names.remove(&key),
-            };
-        }
         self.after_commit(After::Updated(key));
         self.after_commit(After::Changed(key));
         Ok(true)
@@ -437,7 +427,10 @@ impl Game<'_> {
         let [x, y, z] = entity.fields().position;
         match block_entity {
             BlockEntity::Banner(banner) => banner.name.clone(),
-            _ => world.block_names.get(&(x, y, z)).cloned(),
+            _ => world.block_names.get(&(x, y, z)).map(|name| match name {
+                Tag::String(text) => text.to_string_lossy(),
+                component => horizon_client::component::name_text(component).plain(),
+            }),
         }
     }
 
@@ -518,7 +511,7 @@ impl Game<'_> {
             Some(BlockEntity::Banner(banner)) => banner.name = name.map(str::to_owned),
             _ => {
                 match name {
-                    Some(name) => self.world.block_names.insert(key, name.to_owned()),
+                    Some(name) => self.world.block_names.insert(key, Tag::String(name.into())),
                     None => self.world.block_names.remove(&key),
                 };
             }
@@ -542,7 +535,7 @@ fn save_with_metadata(
         return None;
     };
     if let Some(name) = world.block_names.get(&pos) {
-        data.insert("CustomName".into(), Tag::String(name.as_str().into()));
+        data.insert("CustomName".into(), name.clone());
     }
     Some(data)
 }
@@ -1185,6 +1178,22 @@ mod tests {
             assert_eq!(sensor.name(game), None);
             assert!(chest.set_name(game, None).unwrap());
             assert_eq!(chest.name(game), None);
+
+            // An unrelated API merge must preserve the loaded rich name, not
+            // remove it through the plain-text name accessor's projection.
+            let styled = "{text:\"Styled\",color:\"aqua\",extra:[{text:\" chest\",bold:1b}]}";
+            let name = Tag::Compound(compound(styled));
+            assert!(game.load_block_entity_nbt([0, 64, 0], &format!("{{CustomName:{styled}}}")));
+            assert_eq!(game.world.block_names.get(&(0, 64, 0)), Some(&name));
+            assert!(chest.merge_data(game, compound(stick)).unwrap());
+            assert_eq!(slot3(game), Some(3));
+            assert_eq!(game.world.block_names.get(&(0, 64, 0)), Some(&name));
+            assert_eq!(
+                chest.data(game).unwrap().get(&"CustomName".into()),
+                Some(&name)
+            );
+            assert!(chest.replace_data(game, compound("{}")).unwrap());
+            assert_eq!((slot3(game), chest.name(game)), (None, None));
 
             // An abort puts back data and name; a commit keeps them.
             let host: &mut dyn ServerHost = game;

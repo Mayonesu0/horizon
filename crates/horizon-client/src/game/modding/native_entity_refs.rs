@@ -428,7 +428,7 @@ impl Game<'_> {
         }
         let at = horizon_core::position::BlockPos::new(pos[0], pos[1], pos[2]);
         let (changed, drops) = self.with_level(|b, level, ticks| {
-            level.drop_tool = tool.cloned();
+            level.drop_tool = Some(((pos[0], pos[1], pos[2]), tool.cloned()));
             level.drop_into = collect.then(Vec::new);
             let changed = b.destroy_block(level, ticks, at, drop);
             (changed, level.drop_into.take().unwrap_or_default())

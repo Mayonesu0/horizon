@@ -6,7 +6,7 @@ use super::{
     update::{HORIZONTAL, above, below, rel},
 };
 use crate::{
-    fluid::{FluidKind, FluidState},
+    fluid::{FluidKind, FluidState, ModFluid, ModFluidRules},
     registry::BlockStateId,
 };
 use horizon_core::{
@@ -27,18 +27,18 @@ const POSSIBLE_FLOW_DIRECTIONS: [Direction; 5] = [
 fn is_water(kind: FluidKind) -> bool {
     matches!(kind, FluidKind::Water | FluidKind::FlowingWater)
 }
-fn source_of(kind: FluidKind) -> FluidKind {
-    if is_water(kind) {
-        FluidKind::Water
-    } else {
-        FluidKind::Lava
+pub(super) fn source_of(kind: FluidKind) -> FluidKind {
+    match kind {
+        FluidKind::Mod(fluid) | FluidKind::ModFlowing(fluid) => FluidKind::Mod(fluid),
+        _ if is_water(kind) => FluidKind::Water,
+        _ => FluidKind::Lava,
     }
 }
 fn flowing_of(kind: FluidKind) -> FluidKind {
-    if is_water(kind) {
-        FluidKind::FlowingWater
-    } else {
-        FluidKind::FlowingLava
+    match kind {
+        FluidKind::Mod(fluid) | FluidKind::ModFlowing(fluid) => FluidKind::ModFlowing(fluid),
+        _ if is_water(kind) => FluidKind::FlowingWater,
+        _ => FluidKind::FlowingLava,
     }
 }
 
@@ -107,11 +107,18 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     fn fast_lava(&self) -> bool {
         self.level.dimension_type().fast_lava
     }
+    /// What a mod's fluid does at `pos`: as registered, unless its parts say otherwise.
+    fn mod_rules(&self, fluid: ModFluid, pos: BlockPos) -> ModFluidRules {
+        self.level.mod_fluid_rules(pos, fluid, fluid.get().rules)
+    }
     /// `Fluid.getTickDelay`.
-    pub(crate) fn fluid_tick_delay(&self, kind: FluidKind) -> i32 {
+    pub(crate) fn fluid_tick_delay(&self, kind: FluidKind, pos: BlockPos) -> i32 {
         match kind {
             FluidKind::Empty => 0,
             FluidKind::Water | FluidKind::FlowingWater => 5,
+            FluidKind::Mod(fluid) | FluidKind::ModFlowing(fluid) => {
+                self.mod_rules(fluid, pos).tick_delay
+            }
             _ => {
                 if self.fast_lava() {
                     10
@@ -121,21 +128,30 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
         }
     }
-    fn drop_off(&self, kind: FluidKind) -> i32 {
+    fn drop_off(&self, kind: FluidKind, pos: BlockPos) -> i32 {
+        if let Some(fluid) = kind.mod_fluid() {
+            return self.mod_rules(fluid, pos).drop_off;
+        }
         if is_water(kind) || self.fast_lava() {
             1
         } else {
             2
         }
     }
-    fn slope_find_distance(&self, kind: FluidKind) -> i32 {
+    fn slope_find_distance(&self, kind: FluidKind, pos: BlockPos) -> i32 {
+        if let Some(fluid) = kind.mod_fluid() {
+            return self.mod_rules(fluid, pos).slope_find_distance;
+        }
         if is_water(kind) || self.fast_lava() {
             4
         } else {
             2
         }
     }
-    fn can_convert_to_source(&self, kind: FluidKind) -> bool {
+    fn can_convert_to_source(&self, kind: FluidKind, pos: BlockPos) -> bool {
+        if let Some(fluid) = kind.mod_fluid() {
+            return self.mod_rules(fluid, pos).converts_to_source;
+        }
         let rules = self.level.game_rules();
         if is_water(kind) {
             rules.water_source_conversion
@@ -166,6 +182,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             FluidKind::Water | FluidKind::FlowingWater => {
                 direction == Direction::Down && !is_water(other)
             }
+            // NeoForge's `BaseFlowingFluid.canBeReplacedWith`: nothing replaces it.
+            FluidKind::Mod(_) | FluidKind::ModFlowing(_) => false,
             _ => self.fluid_height(fluid, pos) >= 0.444_444_45 && is_water(other),
         }
     }
@@ -176,6 +194,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let index = self.b.facts(state).shape;
         match self.b.collision_shape(state) {
             Some(shape) => (index, shape),
+            // `getCollisionShape(level, pos)` runs with `CollisionContext.empty()`,
+            // under which scaffolding is above the block and not descending: it
+            // reads as the stable shape. The other dynamic shapes stay empty.
+            None if self.b.data(state).is(Class::Scaffolding) => {
+                (-1, crate::dynamic_support::scaffolding_stable_shape_ref())
+            }
             None => (-1, VoxelShape::empty_ref()),
         }
     }
@@ -274,7 +298,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
         }
         self.set_block_and_update(pos, next);
-        let delay = self.fluid_tick_delay(fluid.kind());
+        let delay = self.fluid_tick_delay(fluid.kind(), pos);
         self.schedule_fluid_tick(pos, fluid.kind(), delay);
         // DriedGhastBlock.placeLiquid: its own place-in-water sound.
         if data.is(Class::DriedGhast) {
@@ -355,7 +379,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let b = self.b;
         let mut highest = 0;
         let mut sources = 0;
-        let converts = self.can_convert_to_source(kind);
+        let converts = self.can_convert_to_source(kind, pos);
         for direction in HORIZONTAL {
             let neighbour = self.rel_state(pos, direction);
             let fluid = b.fluid(neighbour);
@@ -388,7 +412,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         {
             return FluidState::new(flowing_of(kind), 8, true);
         }
-        let amount = highest - self.drop_off(kind);
+        let amount = highest - self.drop_off(kind, pos);
         if amount <= 0 {
             FluidState::EMPTY
         } else {
@@ -473,7 +497,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 if self.context_is_hole(kind, context, test_pos) {
                     return pass;
                 }
-                if pass < self.slope_find_distance(kind) {
+                if pass < self.slope_find_distance(kind, test_pos) {
                     let distance = self.slope_distance(
                         kind,
                         test_pos,
@@ -548,10 +572,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if !self.level.allow_spread(Spread::Fluid, from, pos) {
             return;
         }
-        if !is_water(kind)
-            && direction == Direction::Down
-            && b.is_water_fluid(self.fluid_at(pos).kind())
-        {
+        let lava = kind.same_family(FluidKind::Lava);
+        if lava && direction == Direction::Down && b.is_water_fluid(self.fluid_at(pos).kind()) {
             if b.instance_of(state, Class::Liquid)
                 && let Some(state) =
                     self.level
@@ -566,10 +588,11 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             self.place_liquid(pos, state, target, false);
         } else {
             if !b.is_air(state) {
-                if is_water(kind) {
-                    self.drop_resources(state, pos);
-                } else {
+                // Only `LavaFluid.beforeDestroyingBlock` hisses instead of dropping.
+                if lava {
                     self.level_event(1501, pos, 0);
+                } else {
+                    self.drop_resources(state, pos);
                 }
             }
             let legacy = b.legacy_block(target);
@@ -583,7 +606,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         fluid: FluidState,
         state: BlockStateId,
     ) {
-        let mut neighbour = i32::from(fluid.amount()) - self.drop_off(kind);
+        let mut neighbour = i32::from(fluid.amount()) - self.drop_off(kind, pos);
         if fluid.falling() {
             neighbour = 7;
         }
@@ -634,6 +657,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 let name = match kind {
                     FluidKind::Water | FluidKind::FlowingWater => "water",
                     FluidKind::Lava | FluidKind::FlowingLava => "lava",
+                    FluidKind::Mod(_) | FluidKind::ModFlowing(_) => kind.name(),
                     FluidKind::Empty => return,
                 };
                 if !self.level.allow_fluid_level_change(
@@ -665,8 +689,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         old: FluidState,
         new: FluidState,
     ) -> i32 {
-        let delay = self.fluid_tick_delay(kind);
-        if is_water(kind) {
+        let delay = self.fluid_tick_delay(kind, pos);
+        // Only `LavaFluid.getSpreadDelay` differs from `Fluid.getTickDelay`.
+        if !kind.same_family(FluidKind::Lava) {
             return delay;
         }
         if old.kind() != FluidKind::Empty
@@ -722,7 +747,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     pub(crate) fn liquid_block_changed(&mut self, pos: BlockPos, state: BlockStateId) {
         if self.should_spread_liquid(pos, state) {
             let kind = self.b.fluid(state).kind();
-            let delay = self.fluid_tick_delay(kind);
+            let delay = self.fluid_tick_delay(kind, pos);
             self.schedule_fluid_tick(pos, kind, delay);
         }
         if self.should_bubble_column_occupy(state) {

@@ -10,7 +10,7 @@ use crate::{
 };
 use horizon_core::nbt::{Compound, Tag};
 use horizon_protocol::{
-    buf::{BitSet, Codec, List, Writer, set_bit},
+    buf::{BitSet, Codec, List, Writer, check_network_nbt, set_bit},
     chunk::{
         BIOMES, BLOCKS, BlockEntityInfo, ChunkData, Heightmaps, LightData, Paletted, Strategy,
     },
@@ -556,7 +556,7 @@ impl ChunkEncoder {
         )
     }
 
-    fn with_types(
+    pub(super) fn with_types(
         states: impl IntoIterator<Item = (Arc<str>, bool, Option<crate::blocks::SignForm>)>,
         builtin: &Builtin,
         biome_names: &[String],
@@ -749,6 +749,37 @@ impl ChunkEncoder {
                 .and_then(|tag| tag([pos.0, pos.1, pos.2], m))
                 .map(Tag::Compound),
             _ => entity_tag(entity),
+        }
+    }
+    /// The tag of a block change at `pos`: [`Self::update_tag`] with a mod's
+    /// queued one-shot fields taken and put over it. It takes them, so build it
+    /// once, with viewers, and send it to them all; a chunk or a single player's
+    /// resend uses `update_tag`, which leaves them for such a change. Fields that would take the
+    /// tag past what a client reads (`buf::check_network_nbt`) are dropped, and the plain
+    /// `update_tag` goes instead: no viewer is disconnected or misses the change.
+    pub fn change_tag(&self, pos: (i32, i32, i32), entity: &BlockEntity) -> Option<Tag> {
+        let tag = self.update_tag(pos, entity);
+        let BlockEntity::Mod(m) = entity else {
+            return tag;
+        };
+        let Some(fields) = m.take_client_update_fields() else {
+            return tag;
+        };
+        let mut merged = match &tag {
+            Some(Tag::Compound(tag)) => tag.clone(),
+            _ => Compound::new(),
+        };
+        merged.extend(fields);
+        let merged = Tag::Compound(merged);
+        match check_network_nbt(&merged) {
+            Ok(()) => Some(merged),
+            Err(e) => {
+                log::warn!(
+                    "[lan] {} at {pos:?}: one-shot client update fields dropped: {e}",
+                    m.id()
+                );
+                tag
+            }
         }
     }
     /// Whether the state holds a fluid (water, lava, or a waterlogged block).
@@ -1718,6 +1749,84 @@ mod tests {
         encoder.mod_update_tag = None;
         let infos = encoder.encode(&chunk, &block_entities).chunk.block_entities;
         assert_eq!(infos[0].tag, Tag::End);
+    }
+
+    /// A chunk leaves queued one-shot fields alone; a change's tag takes them, once.
+    #[test]
+    fn only_a_changes_tag_takes_queued_client_update_fields() {
+        use crate::block_entity_types::BlockEntityTypes;
+        let builtin = Builtin::parse(
+            r#"{"minecraft:block_entity_type":{"entries":{"test:machine":{"protocol_id":49}}}}"#,
+        )
+        .unwrap();
+        let types = BlockEntityTypes::new(
+            [("test:machine".into(), "test:machine".into())].into(),
+            builtin
+                .get("minecraft:block_entity_type")
+                .unwrap()
+                .names
+                .clone(),
+        );
+        let states = ["minecraft:air", "test:machine"].map(|n| (Arc::<str>::from(n), false, None));
+        let mut encoder = ChunkEncoder::with_types(states, &builtin, &[], &[], Some(&types));
+        encoder.mod_update_tag =
+            Some(|_, entity| (!entity.nbt.is_empty()).then(|| entity.nbt.clone()));
+        let mut chunk = Chunk::empty(0, 0);
+        let pos = (1, MIN_Y + 2, 3);
+        chunk.set(pos.0, pos.1, pos.2, 1);
+        let progress = (JavaString::from("progress"), Tag::Int(7));
+        let effect = (JavaString::from("effect"), Tag::Int(23));
+        let machine = ModBlockEntity::new(
+            "test:machine".into(),
+            crate::containers::ModBlockEntityFields {
+                nbt: Compound::from([progress.clone()]),
+                ..Default::default()
+            },
+        );
+        machine.set_client_update_fields(Compound::from([effect.clone()]));
+        let entities = HashMap::from([(pos, BlockEntity::Mod(Box::new(machine)))]);
+        let plain = Tag::Compound(Compound::from([progress.clone()]));
+        for _ in 0..2 {
+            let sent = encoder.encode(&chunk, &entities).chunk.block_entities;
+            assert_eq!(sent[0].tag, plain);
+        }
+        assert_eq!(
+            encoder.update_tag(pos, &entities[&pos]),
+            Some(plain.clone())
+        );
+        assert_eq!(
+            encoder.change_tag(pos, &entities[&pos]),
+            Some(Tag::Compound(Compound::from([progress, effect.clone()])))
+        );
+        // Fields a client can't read (one byte past vanilla's 2 MiB network quota, or one tag past
+        // the 262,144 it allows) are dropped: the change still sends the plain tag, nothing waits.
+        let BlockEntity::Mod(queued) = &entities[&pos] else {
+            unreachable!()
+        };
+        for unreadable in [
+            Tag::ByteArray(vec![0; 2_097_153]),
+            Tag::List(vec![Tag::Byte(0); 262_145]),
+        ] {
+            queued.set_client_update_fields(Compound::from([(
+                JavaString::from("effect"),
+                unreadable,
+            )]));
+            assert_eq!(
+                encoder.change_tag(pos, &entities[&pos]),
+                Some(plain.clone())
+            );
+            assert!(!queued.has_client_update_fields());
+        }
+        assert_eq!(encoder.change_tag(pos, &entities[&pos]), Some(plain));
+        // A block entity whose mod sends no tag still sends its fields, alone.
+        let silent = ModBlockEntity::new("test:machine".into(), Default::default());
+        silent.set_client_update_fields(Compound::from([effect.clone()]));
+        let silent = BlockEntity::Mod(Box::new(silent));
+        assert_eq!(
+            encoder.change_tag(pos, &silent),
+            Some(Tag::Compound(Compound::from([effect])))
+        );
+        assert_eq!(encoder.change_tag(pos, &silent), None);
     }
 
     /// A mod's sign is of vanilla's block entity type, as its block is on

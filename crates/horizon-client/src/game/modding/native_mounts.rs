@@ -1,7 +1,7 @@
 //! Mounting for native mods (`native_entity_mount`: NeoForge's `EntityMountEvent`). Each place
 //! the acting player or a mob gets on or off a vehicle asks `native_may_board` or
 //! `native_may_leave` first, and does nothing when a mod says no.
-use super::{Game, native_hooks::mob_kind};
+use super::{Game, commands::Target, native_hooks::mob_kind};
 
 impl Game<'_> {
     /// Whether this game is a server whose mounts the mods hear: the server thread or a
@@ -32,6 +32,10 @@ impl Game<'_> {
             "minecraft:cushion".into()
         } else if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
             mob_kind(m)
+        } else if self.armor_stands.iter().any(|a| a.id == id) {
+            self.target_type(Target::Stand(id))
+        } else if self.others.iter().any(|o| o.id == id) {
+            self.target_type(Target::Other(id))
         } else {
             String::new()
         }

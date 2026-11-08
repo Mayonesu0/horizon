@@ -99,6 +99,7 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
         "BlockEntityPart" => Some("block_entity_subscribed"),
         "ItemPart" => Some("item_subscribed"),
         "MenuPart" => Some("menu_subscribed"),
+        "FluidPart" => Some("fluid_subscribed"),
         // Entity parts carry no scoped hook yet (#1077): `register_goals` is
         // not one, so its subscriptions stay empty whatever it overrides.
         "EntityPart" => Some("entity_subscribed_empty"),

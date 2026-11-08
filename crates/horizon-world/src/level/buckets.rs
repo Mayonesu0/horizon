@@ -40,6 +40,7 @@ pub fn fluid_bucket(fluid: FluidKind) -> Option<&'static str> {
     match fluid {
         FluidKind::Water | FluidKind::FlowingWater => Some("minecraft:water_bucket"),
         FluidKind::Lava | FluidKind::FlowingLava => Some("minecraft:lava_bucket"),
+        FluidKind::Mod(fluid) | FluidKind::ModFlowing(fluid) => fluid.get().bucket.as_deref(),
         FluidKind::Empty => None,
     }
 }
@@ -48,7 +49,10 @@ pub fn fluid_bucket(fluid: FluidKind) -> Option<&'static str> {
 /// for the empty fluid, which has none.
 pub fn fluid_pickup_sound(fluid: FluidKind) -> Option<&'static str> {
     match fluid {
-        FluidKind::Water | FluidKind::FlowingWater => Some("minecraft:item.bucket.fill"),
+        FluidKind::Water
+        | FluidKind::FlowingWater
+        | FluidKind::Mod(_)
+        | FluidKind::ModFlowing(_) => Some("minecraft:item.bucket.fill"),
         FluidKind::Lava | FluidKind::FlowingLava => Some("minecraft:item.bucket.fill_lava"),
         FluidKind::Empty => None,
     }
@@ -163,15 +167,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if may_replace && !b.liquid(state) {
             self.destroy_block(pos, true, super::flags::UPDATE_LIMIT);
         }
-        let source = FluidState::new(
-            if water {
-                FluidKind::Water
-            } else {
-                FluidKind::Lava
-            },
-            8,
-            false,
-        );
+        let source = FluidState::new(super::fluids::source_of(fluid), 8, false);
         let legacy: BlockStateId = b.legacy_block(source);
         if !self.set_block(pos, legacy, super::flags::UPDATE_ALL_IMMEDIATE)
             && !self.fluid_at(pos).is_source()

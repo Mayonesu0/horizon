@@ -6,6 +6,8 @@
 unions of those traits, so a mod calls through them and never names an area trait. Each helper keeps its
 receiver and documentation; a helper without `self` (`config_files`) takes
 `&self` in `Host`. Level services stay on the level hosts above.
+For the per-method comparison with NeoForge's block, item, entity, block-entity and fluid extension interfaces,
+including which gaps are tracked, see [NeoForge extension coverage](../../reference/neoforge-extensions.md).
 For item registry facts, `host.item_crafting_remainder(&stack)` returns a count-one
 plain remainder stack, or `None` when there is none or the item is unknown. Horizon
 currently stores only the remainder item id, not a template's count or components.

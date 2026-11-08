@@ -105,6 +105,12 @@ pub trait BlockStatesBackend {
     #[access(Metadata)]
     fn block_state_has_block_entity(&self, state: BlockStateId) -> Option<bool>;
     /// Side: both.
+    /// `BlockState.getMapColor(level, pos)` for a state whose colour does not depend on where it
+    /// stands: its `MapColor.id`, 0 (`MapColor.NONE`) for no colour. Map items colour a column
+    /// by it (`MapItem.update`). None for an unknown state.
+    #[access(Metadata)]
+    fn block_state_map_color(&self, state: BlockStateId) -> Option<u8>;
+    /// Side: both.
     /// The states of `block` (`StateDefinition.getPossibleStates`), as the consecutive ids the
     /// registry numbers them with. None for an unknown block.
     #[access(Metadata)]

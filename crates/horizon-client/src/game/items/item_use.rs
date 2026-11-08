@@ -396,14 +396,15 @@ impl Game<'_> {
     /// `Player.canEat(canAlwaysEat)` for `stack`, food that is eaten only
     /// when hungry, then a mod's answer.
     pub(super) fn can_eat(&self, stack: &ItemStack, can_always_eat: bool) -> bool {
-        let mut can_eat = can_always_eat
+        let vanilla = can_always_eat
             || self.creative
             || self
                 .player
                 .as_ref()
                 .is_some_and(|p| p.health.food.food < 20);
-        self.native_can_eat(stack, &mut can_eat);
-        can_eat
+        let mut answer = None;
+        self.native_can_eat(stack, vanilla, &mut answer);
+        answer.unwrap_or(vanilla)
     }
 }
 

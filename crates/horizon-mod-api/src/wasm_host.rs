@@ -1197,6 +1197,41 @@ mod glue {
     }
 
     #[test]
+    fn a_guests_client_update_fields_cross_back_without_moving_the_revision() {
+        let mut entity = crate::ModBlockEntity::new("test:counter".into(), Default::default());
+        let revision = entity.revision();
+        let mut guest = crate::ModBlockEntity::new("test:counter".into(), Default::default());
+        let batch = crate::Compound::from([("effect".into(), crate::Tag::Int(23))]);
+        let mut view = crate::ModBlockEntityView::new(&mut guest);
+        view.set_client_update_fields(batch.clone());
+        let fields = block_entity_view(&view)
+            .unwrap()
+            .entity
+            .client_update_fields;
+        let context = crate::menu::MenuButtonContext {
+            player: 0,
+            player_entity_id: 0,
+            pos: [0; 3],
+            id: 0,
+        };
+        let mut carried = None;
+        let mut event = crate::MenuButtonEvent {
+            context: &context,
+            entity: crate::ModBlockEntityView::new(&mut entity),
+            carried: &mut carried,
+        };
+        let mut wire = block_entity_view(&event.entity).unwrap();
+        wire.entity.client_update_fields = fields;
+        let output = horizon::mod_api::types::MenuButtonEventOut {
+            entity: Some(wire),
+            carried: None,
+        };
+        write_menu_button_event(&mut event, output).unwrap();
+        assert_eq!(event.entity.entity.client_update_fields(), Some(&batch));
+        assert_eq!(event.entity.entity.revision(), revision);
+    }
+
+    #[test]
     fn refused_menu_quick_move_output_keeps_all_host_state() {
         let mut entity = crate::ModBlockEntity::new("test:counter".into(), Default::default());
         let revision = entity.revision();

@@ -289,8 +289,15 @@ impl Game<'_> {
         let ty = match fluid {
             horizon_client::blocks::Fluid::Water => ParticleType::DrippingDripstoneWater,
             horizon_client::blocks::Fluid::Lava => ParticleType::DrippingDripstoneLava,
-            horizon_client::blocks::Fluid::None if nether => ParticleType::DrippingDripstoneLava,
-            horizon_client::blocks::Fluid::None => ParticleType::DrippingDripstoneWater,
+            // A mod's fluid drips as no fluid above the dripstone would.
+            horizon_client::blocks::Fluid::None | horizon_client::blocks::Fluid::Modded
+                if nether =>
+            {
+                ParticleType::DrippingDripstoneLava
+            }
+            horizon_client::blocks::Fluid::None | horizon_client::blocks::Fluid::Modded => {
+                ParticleType::DrippingDripstoneWater
+            }
         };
         let offset = self
             .pack

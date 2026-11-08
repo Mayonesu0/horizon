@@ -30,6 +30,7 @@ The preprocessor needs only Python 3 and runs automatically in local and CI buil
 
 ## Reference
 
+- [NeoForge extension coverage](reference/neoforge-extensions.md): every public method of NeoForge 26.3's block, item, entity, block-entity and fluid extension interfaces, and what Horizon has for it.
 - [The manifest and the package](reference/manifest.md)
 - [The registry index](reference/registry-index.md)
 - [Hook notes](reference/hook-notes.md)

@@ -136,7 +136,7 @@ fn after_pre<S>(s: &mut HurtState<S>, container: &DamageContainer, cooldown: i32
 /// and the block left. It owns no borrow, so a caller can wear the helmet on a world
 /// [`hurt_until_helmet`] could not reach, then resume with [`hurt_after_helmet`], which runs
 /// none of that again.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PendingHurt<U> {
     pub(crate) container: DamageContainer,
     damage: f32,
@@ -258,12 +258,17 @@ pub fn select_equipment_hurt<W: HurtWorld>(
         if hit.damage <= s.last_hurt {
             return Ok(None);
         }
-        hit.container
-            .record_reduction(Reduction::Invulnerability, s.last_hurt);
+        let dealt = hit.container.reduce(
+            Reduction::Invulnerability,
+            hit.damage,
+            s.last_hurt,
+            hit.damage - s.last_hurt,
+            true,
+        );
         let cooldown = s.cooldown;
         hit.container
             .set_post_attack_invulnerability_ticks(cooldown);
-        (hit.damage - s.last_hurt, cooldown)
+        (dealt, cooldown)
     };
     Ok(Some(SelectedHurt {
         hit,

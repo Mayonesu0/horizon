@@ -16,7 +16,7 @@ pub trait Hooks {
         side = "client",
         contract = "cancel",
         out = "cancel",
-        neoforge = "ClientChatReceivedEvent",
+        neoforge = "ClientChatReceivedEvent, ClientChatReceivedEvent.System",
         cancellable = true
     )]
     fn client_chat_received();

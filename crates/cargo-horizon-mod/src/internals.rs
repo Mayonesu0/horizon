@@ -220,9 +220,18 @@ fn sync(dir: &Path, repo: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-fn atomic_write(path: &Path, contents: String) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, contents: String) -> Result<(), String> {
+    let permissions = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
     let temporary = path.with_extension("toml.sync");
     fs::write(&temporary, contents)
+        .and_then(|()| match permissions {
+            Some(permissions) => fs::set_permissions(&temporary, permissions),
+            None => Ok(()),
+        })
         .and_then(|()| fs::rename(&temporary, path))
         .map_err(|e| {
             let _ = fs::remove_file(&temporary);

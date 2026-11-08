@@ -5,7 +5,7 @@
 //! the world is simulated, in the level in place: on the server thread, for a
 //! server's players, and in-frame on the window's own level. Clients get the
 //! new entities through the tracker, as any other.
-use super::{Game, dispenser, spill};
+use super::{Game, spill};
 use horizon_items::items::ItemStack;
 use mod_api::{EntityRef, LevelRef};
 
@@ -25,12 +25,12 @@ impl Game<'_> {
         level: LevelRef,
         stack: ItemStack,
         at: [f64; 3],
-        motion: [f64; 3],
+        motion: Option<[f64; 3]>,
         pickup_delay: u32,
     ) -> Option<EntityRef> {
         // `spawn_item` takes the next id.
         let id = self.next_entity + 1;
-        self.spawn_item(stack, at, motion, pickup_delay);
+        self.add_item_entity(stack, at, motion, pickup_delay);
         self.dropped
             .iter()
             .rev()
@@ -64,7 +64,7 @@ impl Game<'_> {
         {
             return None;
         }
-        self.spawn_level_item(level, stack, at, dispenser::new_item_motion(), 10)
+        self.spawn_level_item(level, stack, at, None, 10)
     }
     /// Spawns `stack` as an item entity at `x y z` (`new ItemEntity(level, x,
     /// y, z, stack)` and `addFreshEntity`): its own random motion (up 0.2, up
@@ -120,7 +120,6 @@ impl Game<'_> {
         if !finite || !self.level_in_place(level) || !self.stack_spawns(&stack) {
             return None;
         }
-        let motion = motion.unwrap_or_else(dispenser::new_item_motion);
         self.spawn_level_item(level, stack, [x, y, z], motion, pickup_delay)
     }
     /// Awards `amount` experience at `x y z` as vanilla's `ExperienceOrb.award`
@@ -333,14 +332,22 @@ mod tests {
                         ticks,
                         health: 5,
                         no_gravity: true,
+                        following: None,
                     }
                 };
                 // A takes X; B, far off, ticks after A. The award is id 160.
-                game.orbs.push(orb(40, 0.5, 3, 1));
-                game.orbs.push(orb(80, 0.5, 3, 0));
-                game.orbs.push(orb(120, 100.5, 3, 1));
+                // The per-orb scan runs before tick increments ticks, so 0 scans now.
+                game.orbs.push(orb(40, 0.5, 3, 0));
+                game.orbs.push(orb(80, 0.5, 3, 1));
+                game.orbs.push(orb(120, 100.5, 3, 0));
                 game.next_entity = 159;
-                game.merge_orbs();
+                // Only initial residents take turns; each scan sees hook-awarded residents.
+                let ticking: Vec<_> = game.orbs.iter().map(|orb| orb.join).collect();
+                for join in ticking {
+                    if let Some(index) = game.orbs.locate(join) {
+                        game.merge_orb(index);
+                    }
+                }
                 let left: Vec<(u32, u32)> = game.orbs.iter().map(|o| (o.id, o.count)).collect();
                 assert_eq!(left, [(40, 2), (120, 2)]);
             });

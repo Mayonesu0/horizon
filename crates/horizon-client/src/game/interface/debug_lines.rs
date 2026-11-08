@@ -466,6 +466,14 @@ impl Game<'_> {
             Fluid::None => return ("minecraft:empty".into(), Vec::new()),
             Fluid::Water => "water",
             Fluid::Lava => "lava",
+            Fluid::Modded => {
+                let state = self.world.block(pos[0], pos[1], pos[2]);
+                let name = self.res.behaviours().fluid(state).kind().name();
+                return (
+                    name.to_owned(),
+                    vec![("falling", f.fluid_falling.to_string())],
+                );
+            }
         };
         let falling = ("falling", f.fluid_falling.to_string());
         if f.fluid_level == 8 && !f.fluid_falling {

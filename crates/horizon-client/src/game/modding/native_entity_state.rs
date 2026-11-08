@@ -621,6 +621,7 @@ mod tests {
                 ticks: 21,
                 health: 5,
                 no_gravity: true,
+                following: None,
             });
             let orb = game.entity(43).unwrap();
             assert_eq!(orb.tick_count(game), Some(21));
@@ -712,6 +713,7 @@ mod tests {
                 count: 1,
                 ticks: 0,
                 health: 5,
+                following: None,
             });
             game.boats
                 .push(Boat::new(42, "oak".into(), Vec3::ZERO, 0.0));

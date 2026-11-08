@@ -153,15 +153,20 @@ impl Game<'_> {
             return;
         };
         let at = g.position;
+        let players = self.stab_players_for(conn);
         let sound = self
             .guest_hit_by(conn, |g| {
                 if g.cannot_attack_with_item(g.attack_ticks as i32, 5) {
                     None
                 } else {
-                    g.jab()
+                    let outer = std::mem::replace(&mut g.stab_players, players);
+                    let sound = g.jab();
+                    g.stab_players = outer;
+                    sound
                 }
             })
             .flatten();
+        self.land_player_stabs();
         // PiercingWeapon.makeSound: `playSound(causer, ...)`, so the guest's
         // own client plays it.
         if let Some(name) = sound {

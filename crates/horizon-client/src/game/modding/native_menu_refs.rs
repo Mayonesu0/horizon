@@ -85,6 +85,43 @@ impl Game<'_> {
             && self.remote_button_click(button)
     }
 
+    pub(super) fn menu_slot_boxes(&self, menu: MenuRef) -> Option<Vec<Option<[f32; 4]>>> {
+        if self.screen != super::Screen::Inventory || !self.screen_hooks_open() {
+            return None;
+        }
+        let name = self.native_client_menu_name(menu)?;
+        let renderer = self.renderer.as_ref()?;
+        let batch = super::HudBatch::new(
+            [renderer.config.width, renderer.config.height],
+            self.settings.gui_scale_inputs(),
+        );
+        self.inventory_menu_slot_boxes(name, &batch)
+    }
+
+    fn inventory_menu_slot_boxes(
+        &self,
+        name: &str,
+        batch: &super::HudBatch,
+    ) -> Option<Vec<Option<[f32; 4]>>> {
+        Self::inventory_screen_slot(name, 0)?;
+        if self.book_covers_menu(batch.width) {
+            return None;
+        }
+        let visible = self.slots();
+        let (ox, oy) = self.inventory_origin(batch);
+        Some(
+            (0..)
+                .map_while(|slot| Self::inventory_screen_slot(name, slot))
+                .map(|slot| {
+                    visible.contains(&slot).then(|| {
+                        let (x, y) = self.slot_position(slot);
+                        [ox + x, oy + y, 16.0, 16.0]
+                    })
+                })
+                .collect(),
+        )
+    }
+
     fn native_client_menu_name(&self, menu: MenuRef) -> Option<&str> {
         let remote = self.remote.as_ref().filter(|remote| remote.logged_in)?;
         let epoch = self.native_lifecycle.epoch()?;
@@ -450,6 +487,28 @@ mod tests {
         Arc,
         atomic::{AtomicI32, AtomicUsize},
     };
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn inventory_boxes_follow_menu_indices_and_the_input_layout() {
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            game.screen = super::super::Screen::Inventory;
+            let batch = super::super::HudBatch::new([800, 600], game.settings.gui_scale_inputs());
+            let boxes = game.inventory_menu_slot_boxes("inventory", &batch).unwrap();
+            assert_eq!(boxes.len(), 46);
+            for (index, expected_slot) in [(0, 200), (9, 9), (36, 0), (45, 504)] {
+                let [x, y, w, h] = boxes[index].unwrap();
+                assert_eq!(
+                    game.slot_at(&batch, x + w / 2.0, y + h / 2.0),
+                    Some(expected_slot)
+                );
+            }
+            assert!(
+                game.inventory_menu_slot_boxes("unsupported", &batch)
+                    .is_none()
+            );
+        });
+    }
 
     #[test]
     fn client_click_actions_encode_vanilla_ops() {

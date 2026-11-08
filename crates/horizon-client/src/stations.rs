@@ -210,6 +210,14 @@ pub fn is_damageable(items: &Items, stack: &ItemStack) -> bool {
 fn max_damage(items: &Items, stack: &ItemStack) -> i32 {
     stack.max_damage(items.get(&stack.item))
 }
+/// `ItemStack.getDamageValue`: the damage clamped to `[0, max_damage]`.
+fn damage_value(items: &Items, stack: &ItemStack) -> i32 {
+    (stack.damage.min(i32::MAX as u32) as i32).clamp(0, max_damage(items, stack).max(0))
+}
+/// `ItemStack.setDamageValue`: stored clamped to `[0, max_damage]`.
+fn set_damage_value(items: &Items, stack: &mut ItemStack, damage: i32) {
+    stack.damage = damage.clamp(0, max_damage(items, stack).max(0)) as u32;
+}
 /// `ItemStack.isValidRepairItem`.
 pub fn is_valid_repair_item(
     e: &Enchantments,
@@ -230,16 +238,56 @@ pub fn is_valid_repair_item(
     e.props(&stack.item)
         .is_some_and(|p| Enchantments::item_in(items, &p.repairable, &material.item))
 }
+/// `stack.has(STORED_ENCHANTMENTS)`: the enchanted book's default component
+/// unless removed, or an explicitly set one, even when empty.
+fn has_stored_enchantments(stack: &ItemStack) -> bool {
+    let data = stack.data();
+    if data.is_some_and(|d| d.other("!minecraft:stored_enchantments").is_some()) {
+        return false;
+    }
+    &*stack.item == "minecraft:enchanted_book"
+        || !stack.stored_enchantments().is_empty()
+        || data.is_some_and(|d| d.other("minecraft:stored_enchantments").is_some())
+}
 /// `AnvilMenu.calculateIncreasedRepairCost`.
 pub fn increased_repair_cost(cost: u32) -> u32 {
     (u64::from(cost) * 2 + 1).min(i32::MAX as u64) as u32
 }
-/// The display name the rename box starts with (`getHoverName`).
-pub fn hover_name(names: &dyn Fn(&str) -> String, stack: &ItemStack) -> String {
-    stack
-        .custom_name()
-        .or_else(|| stack.item_name())
-        .unwrap_or_else(|| names(&stack.item))
+/// `ItemStack.getHoverName`: the custom name, a written book's title, the
+/// `item_name` component, else the item's, potion's or head owner's name.
+pub fn hover_name(names: &crate::creative::Names, stack: &ItemStack) -> String {
+    if let Some(name) = stack.custom_name() {
+        return name;
+    }
+    if let Some(title) = stack
+        .data()
+        .and_then(|d| d.written.as_ref())
+        .map(|w| w.title.as_str())
+        .filter(|t| !t.trim().is_empty())
+    {
+        return title.to_owned();
+    }
+    if let Some(name) = stack.item_name() {
+        return name;
+    }
+    if stack.data().is_some_and(|d| d.ominous_banner) {
+        return names
+            .display_get("block.minecraft.ominous_banner")
+            .unwrap_or_else(|| "Ominous Banner".to_owned());
+    }
+    if stack.potion().is_some()
+        || stack.item.ends_with("potion")
+        || &*stack.item == "minecraft:tipped_arrow"
+    {
+        let key = crate::brewing::potion_name_key(&stack.item, stack.potion());
+        return names
+            .display_get(&key)
+            .unwrap_or_else(|| names.display_item(&stack.item));
+    }
+    if let Some(head) = crate::item_tooltip::player_head_name(stack) {
+        return head.title(&|key| names.display_get(key));
+    }
+    names.display_item(&stack.item)
 }
 /// `AnvilMenu.createResult`. `name` is the rename box text (None = untouched).
 pub fn anvil_result(
@@ -265,19 +313,19 @@ pub fn anvil_result(
     if let Some(addition) = addition {
         // addition.has(STORED_ENCHANTMENTS): an enchanted book (its default
         // component), or any item given stored enchantments.
-        let using_book = &*addition.item == "minecraft:enchanted_book"
-            || !addition.stored_enchantments().is_empty();
+        let using_book = has_stored_enchantments(addition);
         if is_damageable(items, &result) && is_valid_repair_item(e, items, input, addition) {
             let max = max_damage(items, &result);
-            let mut repair = (result.damage as i32).min(max / 4);
+            let mut repair = damage_value(items, &result).min(max / 4);
             if repair <= 0 {
                 return fail;
             }
             let mut count = 0;
             while repair > 0 && count < addition.count {
-                result.damage = (result.damage as i32 - repair) as u32;
+                let damage = damage_value(items, &result) - repair;
+                set_damage_value(items, &mut result, damage);
                 price += 1;
-                repair = (result.damage as i32).min(max / 4);
+                repair = damage_value(items, &result).min(max / 4);
                 count += 1;
             }
             repair_item_count_cost = count;
@@ -287,13 +335,13 @@ pub fn anvil_result(
             }
             if is_damageable(items, &result) && !using_book {
                 let max = max_damage(items, &result);
-                let remaining1 = max - input.damage as i32;
-                let remaining2 = max_damage(items, addition) - addition.damage as i32;
+                let remaining1 = max_damage(items, input) - damage_value(items, input);
+                let remaining2 = max_damage(items, addition) - damage_value(items, addition);
                 let additional = remaining2 + max * 12 / 100;
                 let remaining = remaining1 + additional;
                 let damage = (max - remaining).max(0);
-                if damage < result.damage as i32 {
-                    result.damage = damage as u32;
+                if damage < damage_value(items, &result) {
+                    set_damage_value(items, &mut result, damage);
                     price += 2;
                 }
             }
@@ -437,8 +485,8 @@ pub fn grindstone_result(
                 return None;
             }
             let durability = max_damage(items, a).max(max_damage(items, b));
-            let remaining = (max_damage(items, a) - a.damage as i32)
-                + (max_damage(items, b) - b.damage as i32)
+            let remaining = (max_damage(items, a) - damage_value(items, a))
+                + (max_damage(items, b) - damage_value(items, b))
                 + durability * 5 / 100;
             let mut count = 1;
             if !is_damageable(items, a) {
@@ -450,7 +498,12 @@ pub fn grindstone_result(
             }
             let mut out = ItemStack { count, ..a.clone() };
             if is_damageable(items, &out) {
-                out.damage = (durability - remaining).max(0) as u32;
+                // GrindstoneMenu.mergeItems writes the larger MAX_DAMAGE first.
+                out.data_mut().set_other(
+                    "minecraft:max_damage",
+                    Some(horizon_core::nbt::Tag::Int(durability)),
+                );
+                set_damage_value(items, &mut out, durability - remaining);
             }
             // mergeEnchantsFrom
             let mut levels = out.crafting_enchantments().to_vec();
@@ -539,13 +592,21 @@ pub(crate) enum ParsedStationRecipe {
 impl ParsedStationRecipe {
     pub(crate) fn parse(id: String, v: &Value, items: &Items) -> Option<Self> {
         match v["type"].as_str().unwrap_or("") {
-            "minecraft:smithing_transform" => Some(Self::Smithing(Smithing::Transform {
-                id,
-                template: v.get("template").map(|v| ingredient(v, items)),
-                base: ingredient(&v["base"], items),
-                addition: v.get("addition").map(|v| ingredient(v, items)),
-                result: crate::crafting::Template::parse(&v["result"])?,
-            })),
+            "minecraft:smithing_transform" => {
+                // Only omitted ingredients mean empty slots; malformed present
+                // ingredients invalidate the recipe rather than becoming optional.
+                let parse_optional = |key: &str| match v.get(key) {
+                    None => Some(None),
+                    Some(value) => Ingredient::parse(value, items).map(Some),
+                };
+                Some(Self::Smithing(Smithing::Transform {
+                    id,
+                    template: parse_optional("template")?,
+                    base: Ingredient::parse(&v["base"], items)?,
+                    addition: parse_optional("addition")?,
+                    result: crate::crafting::Template::parse(&v["result"])?,
+                }))
+            }
             "minecraft:smithing_trim" => Some(Self::Smithing(Smithing::Trim {
                 id,
                 template: ingredient(&v["template"], items),
@@ -740,7 +801,16 @@ impl StationRecipes {
         base: Option<&ItemStack>,
         addition: Option<&ItemStack>,
     ) -> Option<(&str, ItemStack)> {
-        let base = base?;
+        let nonempty = |stack: &ItemStack| stack.count > 0 && &*stack.item != "minecraft:air";
+        let base = base.filter(|s| nonempty(s))?;
+        let optional_matches = |ingredient: &Option<Ingredient>, stack: Option<&ItemStack>| match (
+            ingredient,
+            stack.filter(|s| nonempty(s)),
+        ) {
+            (None, None) => true,
+            (Some(ingredient), Some(stack)) => ingredient.test_in(context, stack),
+            _ => false,
+        };
         for r in &self.smithing {
             match r {
                 Smithing::Transform {
@@ -750,12 +820,9 @@ impl StationRecipes {
                     addition: a,
                     result,
                 } => {
-                    if t.as_ref().map_or(template.is_none(), |i| {
-                        template.is_some_and(|s| i.test_in(context, s))
-                    }) && b.test_in(context, base)
-                        && a.as_ref().map_or(addition.is_none(), |i| {
-                            addition.is_some_and(|s| i.test_in(context, s))
-                        })
+                    if optional_matches(t, template)
+                        && b.test_in(context, base)
+                        && optional_matches(a, addition)
                     {
                         let output = result.over(base, 0);
                         let (mut max_stack, mut max_damage) = self
@@ -876,6 +943,65 @@ mod tests {
             s.enchant(id, *l);
         }
         s
+    }
+
+    fn worn(item: &str, max: i32, damage: u32) -> ItemStack {
+        let mut s = ItemStack::new(item, 1);
+        s.damage = damage;
+        s.data_mut().set_other(
+            "minecraft:max_damage",
+            Some(horizon_core::nbt::Tag::Int(max)),
+        );
+        s
+    }
+
+    /// Grindstone: the larger MAX_DAMAGE is written and the damage follows it.
+    #[test]
+    fn grindstone_merge_uses_component_max_damage() {
+        let e = sample();
+        let items = sample_items();
+        let a = worn("minecraft:diamond_sword", 100, 90);
+        let b = worn("minecraft:diamond_sword", 200, 190);
+        let out = grindstone_result(&e, &items, Some(&a), Some(&b)).unwrap();
+        assert_eq!(
+            out.data().unwrap().other("minecraft:max_damage"),
+            Some(&horizon_core::nbt::Tag::Int(200))
+        );
+        // remaining 10 + 10 + 200 * 5 / 100 = 30 -> damage 170.
+        assert_eq!(out.damage, 170);
+    }
+
+    /// Anvil: merging two damaged items reads each stack's own max damage.
+    #[test]
+    fn anvil_merge_uses_component_max_damage() {
+        let e = sample();
+        let items = sample_items();
+        let a = worn("minecraft:diamond_sword", 100, 50);
+        let b = worn("minecraft:diamond_sword", 100, 50);
+        let r = anvil_result(&e, &items, Some(&a), Some(&b), None, "", false);
+        // remaining 50 + 50 + 12 = 112 -> damage 0.
+        assert_eq!(r.result.unwrap().damage, 0);
+        assert_eq!(r.cost, 2);
+    }
+
+    /// `has(STORED_ENCHANTMENTS)` is presence: an empty component counts, an
+    /// enchanted book counts by default.
+    #[test]
+    fn stored_enchantments_presence() {
+        let mut stick = ItemStack::new("minecraft:stick", 1);
+        assert!(!has_stored_enchantments(&stick));
+        stick.data_mut().set_other(
+            "minecraft:stored_enchantments",
+            Some(horizon_core::nbt::Tag::compound(Vec::<(&str, _)>::new())),
+        );
+        assert!(has_stored_enchantments(&stick));
+        let mut book = ItemStack::new("minecraft:enchanted_book", 1);
+        assert!(has_stored_enchantments(&book));
+        book.data_mut().set_other(
+            "!minecraft:stored_enchantments",
+            Some(horizon_core::nbt::Tag::compound(Vec::<(&str, _)>::new())),
+        );
+        assert!(!has_stored_enchantments(&book));
     }
 
     #[test]
@@ -1301,6 +1427,137 @@ mod tests {
             Some(&horizon_core::nbt::Tag::String("trim.example.wave".into()))
         );
         assert!(decal);
+    }
+
+    #[test]
+    fn smithing_transform_overlay_matches_optional_inputs_and_takes_template_result() {
+        use crate::{banner::Banners, brewing::Brewing, crafting::Recipes, creative::Names, menu};
+        let root = std::env::temp_dir().join(format!("horizon-smithing-{}", std::process::id()));
+        fs::create_dir_all(root.join("data/minecraft/recipe")).unwrap();
+        fs::write(
+            root.join("items.json"),
+            r#"{
+            "minecraft:stick":{"minecraft:max_stack_size":64},
+            "minecraft:diamond":{"minecraft:max_stack_size":64},
+            "minecraft:emerald":{"minecraft:max_stack_size":64},
+            "minecraft:diamond_sword":{"minecraft:max_stack_size":1,"minecraft:max_damage":1561}
+        }"#,
+        )
+        .unwrap();
+        let context = crate::test_resources::server_load();
+        let ctx = crate::test_resources::server_loop_context();
+        let defaults = horizon_world::item_defaults::read(&root).unwrap();
+        let items = Items::catalog(&root, &PackOverlay::NONE, &defaults).unwrap();
+        let recipe = serde_json::json!({"type":"minecraft:smithing_transform",
+            "base":"minecraft:stick", "addition":"minecraft:diamond",
+            "result":{"id":"minecraft:emerald","count":3,
+                "components":{"minecraft:custom_name":"Upgraded","minecraft:repair_cost":0}}});
+        let files = vec![(
+            "recipe/test:upgrade".to_owned(),
+            vec![serde_json::to_vec(&recipe).unwrap()],
+        )];
+        let overlay = PackOverlay::new(&files);
+        let stations = StationRecipes::load(&root, &items, &overlay, &context);
+        let e = sample();
+        let mut base = ItemStack::new("minecraft:stick", 2);
+        base.data_mut()
+            .set_loot_name("minecraft:custom_name", &serde_json::json!("Original"));
+        base.data_mut().repair_cost = 7;
+        base.data_mut()
+            .set_loot_component("minecraft:custom_data", &serde_json::json!({"kept":1}));
+        let addition = ItemStack::new("minecraft:diamond", 2);
+        let result = stations
+            .smithing_result(ctx, &e, None, Some(&base), Some(&addition))
+            .expect("omitted template accepts an empty slot");
+        assert_eq!(
+            (&*result.item, result.count, result.repair_cost()),
+            ("minecraft:emerald", 3, 0)
+        );
+        assert_eq!(
+            result.data().unwrap().custom_name,
+            Some(horizon_core::nbt::Tag::String("Upgraded".into()))
+        );
+        assert!(
+            result
+                .data()
+                .unwrap()
+                .other("minecraft:custom_data")
+                .is_some()
+        );
+        assert!(
+            stations
+                .smithing_result(ctx, &e, Some(&addition), Some(&base), Some(&addition))
+                .is_none()
+        );
+        assert!(
+            stations
+                .smithing_result(ctx, &e, None, Some(&base), None)
+                .is_none()
+        );
+        let recipes = Recipes::load(&root, &items, &PackOverlay::NONE, &context).unwrap();
+        let brewing = Brewing::load(&root, &items, &PackOverlay::NONE);
+        let banners = Banners::load(&root, &defaults);
+        let names = Names::default();
+        let env = menu::Env {
+            player: None,
+            player_entity_id: None,
+            loop_context: ctx,
+            items: &items,
+            recipes: &recipes,
+            brewing: &brewing,
+            banners: &banners,
+            station_recipes: &stations,
+            enchantments: &e,
+            names: &names,
+            trade: None,
+            maps: None,
+            limited_crafting: false,
+            known_recipes: None,
+        };
+        let mut menu = menu::Menu::new(menu::Kind::Smithing);
+        menu.set_slot(&env, 1, Some(base));
+        menu.set_slot(&env, 2, Some(addition));
+        assert_eq!(menu.slot(3), Some(&result));
+        menu.click(&env, 3, 0, menu::Input::Pickup).unwrap();
+        assert_eq!(menu.carried.as_ref(), Some(&result));
+        assert!(menu.slot(0).is_none());
+        assert_eq!(menu.slot(1).unwrap().count, 1);
+        assert_eq!(menu.slot(2).unwrap().count, 1);
+        assert_eq!(menu.crafted[0].0, "test:upgrade");
+        for result in [
+            serde_json::json!({"id":"minecraft:emerald","count":0}),
+            serde_json::json!({"id":"minecraft:emerald","count":100}),
+            serde_json::json!({"id":"minecraft:diamond_sword","count":2}),
+            serde_json::json!({"id":"minecraft:emerald","components":{"minecraft:max_damage":10}}),
+        ] {
+            let mut invalid = recipe.clone();
+            invalid["result"] = result;
+            let files = vec![(
+                "recipe/test:invalid".to_owned(),
+                vec![serde_json::to_vec(&invalid).unwrap()],
+            )];
+            let stations = StationRecipes::load(&root, &items, &PackOverlay::new(&files), &context);
+            assert!(
+                stations
+                    .smithing_result(ctx, &e, None, menu.slot(1), menu.slot(2))
+                    .is_none(),
+                "{invalid}"
+            );
+        }
+        for key in ["template", "base", "addition"] {
+            let mut invalid = recipe.clone();
+            invalid[key] = Value::Null;
+            let files = vec![(
+                "recipe/test:invalid".to_owned(),
+                vec![serde_json::to_vec(&invalid).unwrap()],
+            )];
+            let stations = StationRecipes::load(&root, &items, &PackOverlay::new(&files), &context);
+            assert!(
+                stations.smithing.is_empty(),
+                "malformed {key} must not become optional"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

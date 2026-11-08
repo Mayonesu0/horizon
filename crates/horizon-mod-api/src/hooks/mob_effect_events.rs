@@ -17,6 +17,7 @@ pub trait Hooks {
         out = "cancel",
         host = "read",
         neoforge = "MobEffectEvent.Expired",
+        paper = "EntityPotionEffectEvent",
         cancellable = true
     )]
     fn mob_effect_expired();
@@ -26,6 +27,7 @@ pub trait Hooks {
         contract = "cancel",
         out = "cancel",
         neoforge = "MobEffectEvent.Remove",
+        paper = "EntityPotionEffectEvent",
         cancellable = true
     )]
     fn mob_effect_remove();

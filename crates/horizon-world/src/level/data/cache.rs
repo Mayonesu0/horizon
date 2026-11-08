@@ -436,7 +436,8 @@ impl Snapshot {
                 sturdy: fact.sturdy,
                 weak: fact.weak,
                 strong: fact.strong,
-                fluid_kind: fact.fluid.kind() as u8,
+                // A mod fluid's kind is rebuilt from its block's name on load.
+                fluid_kind: fact.fluid.kind().vanilla_index().unwrap_or(0),
                 fluid_amount: fact.fluid.amount(),
                 fluid_falling: fact.fluid.falling(),
                 emission: fact.emission,
@@ -620,7 +621,8 @@ impl Snapshot {
         let facts = self
             .facts
             .into_iter()
-            .map(|wire| {
+            .enumerate()
+            .map(|(id, wire)| {
                 if wire.shape < -1 || wire.shape >= shapes.len() as i32 {
                     return Err(invalid("cached shape index out of range"));
                 }
@@ -628,12 +630,20 @@ impl Snapshot {
                     .get(wire.fluid_kind as usize)
                     .copied()
                     .ok_or_else(|| invalid("cached fluid kind out of range"))?;
+                let fluid = registry
+                    .state(BlockStateId(id as u32))
+                    .map(crate::fluid::mod_fluid_of_block)
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        FluidState::new(fluid_kind, wire.fluid_amount, wire.fluid_falling)
+                    });
                 Ok(StateFacts {
                     flags: wire.flags,
                     sturdy: wire.sturdy,
                     weak: wire.weak,
                     strong: wire.strong,
-                    fluid: FluidState::new(fluid_kind, wire.fluid_amount, wire.fluid_falling),
+                    fluid,
                     emission: wire.emission,
                     dampening: wire.dampening,
                     hardness: wire.hardness,

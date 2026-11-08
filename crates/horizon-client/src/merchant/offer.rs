@@ -1,7 +1,7 @@
 //! Engine trading values and payment operations.
 use crate::items::{ItemStack, Items};
-/// An `ItemCost`: item and count (component predicates are not used by the
-/// 26.3 trade data except for one exact match, kept as the stack's data).
+/// An `ItemCost`: item, count and the required exact component subset,
+/// kept as the stack's component patch.
 #[derive(Clone, Debug, PartialEq)]
 // exhaustive: the game builds it with a literal; mods only read it
 pub struct ItemCost {
@@ -9,7 +9,19 @@ pub struct ItemCost {
 }
 impl ItemCost {
     pub fn test(&self, s: &ItemStack) -> bool {
-        s.item == self.stack.item && (self.stack.extra.is_none() || s.data() == self.stack.data())
+        if s.item != self.stack.item {
+            return false;
+        }
+        // DataComponentExactPredicate checks required values, allowing unrelated components.
+        let Some(horizon_core::nbt::Tag::Compound(required)) =
+            crate::item_data::components_tag(self.stack.damage, self.stack.data())
+        else {
+            return true;
+        };
+        let actual = crate::item_data::components_tag(s.damage, s.data());
+        required.iter().all(|(key, value)| {
+            matches!(&actual, Some(horizon_core::nbt::Tag::Compound(c)) if c.get(key) == Some(value))
+        })
     }
 }
 #[derive(Clone, Debug, PartialEq)]

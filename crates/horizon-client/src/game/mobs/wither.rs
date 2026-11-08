@@ -50,10 +50,9 @@ impl Game<'_> {
             let _ = self.level_set(pos, rose);
             return;
         }
-        self.spawn_item(
+        self.spawn_item_own(
             ItemStack::new("minecraft:wither_rose", 1),
             [m.position.x, m.position.y, m.position.z],
-            super::dispenser::new_item_motion(),
             0,
         );
     }
@@ -249,7 +248,14 @@ impl Game<'_> {
             self.combat.blast_resistance_cap = Some(0.8);
         }
         self.combat.explosion_direct = Some(p.id);
-        let result = self.with_hive_emptying_blast(|g| g.explode(Some(p.id), at, 1.0));
+        let result = self.with_hive_emptying_blast(|g| {
+            g.explode(
+                Some(p.id),
+                at,
+                1.0,
+                super::explosion::ExplosionSource::default().with_silence(g.entity_silent(p.id)),
+            )
+        });
         self.combat.explosion_direct = None;
         self.combat.blast_resistance_cap = None;
         self.set_blast_by_player(false);

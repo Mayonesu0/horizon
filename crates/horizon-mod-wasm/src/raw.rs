@@ -143,15 +143,10 @@ pub(crate) fn listen(manifest: &Manifest, exports: &Exports) -> Result<Option<Li
     let mut expected = BTreeMap::new();
     for injection in &injections {
         check_slot(table, &manifest.id, injection)?;
-        let kind = if injection.kind == Kind::Return {
-            horizon_mod_package::manifest::InjectionKind::Return
-        } else {
-            horizon_mod_package::manifest::InjectionKind::Head
-        };
         expected.insert(
             injection.id.as_str(),
             (
-                crate::points::target_place(&injection.at, kind)?,
+                crate::points::target_place(&injection.at, injection.kind)?,
                 *injection,
             ),
         );

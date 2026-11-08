@@ -145,7 +145,13 @@ impl<'a, A: HealthAttributes, E: ServerDamageEnvironment<A>> ServerPlayerDamage<
             let toughness = self.toughness_attribute()? as f32;
             crate::combat_rules::after_armor(self, damage, armor, toughness)?
         };
-        container.record_reduction(crate::living_damage::Reduction::Armor, before - damage);
+        let damage = container.reduce(
+            crate::living_damage::Reduction::Armor,
+            before,
+            before - damage,
+            damage,
+            !bypass_armor,
+        );
         living_damage::actually_hurt_after_armor(self, container, damage, true)
     }
 }
@@ -247,6 +253,9 @@ impl<A: HealthAttributes, E: ServerDamageEnvironment<A>> DamageWorld
     }
     fn after_armor(&mut self, v: f32) -> Result<f32, Self::Error> {
         damage_reduction::after_armor(self, v)
+    }
+    fn bypasses_armor(&mut self) -> Result<bool, Self::Error> {
+        self.bypasses(Bypass::Armor)
     }
     fn after_magic(&mut self, v: f32) -> Result<MagicAbsorb, Self::Error> {
         damage_reduction::after_magic(self, v)

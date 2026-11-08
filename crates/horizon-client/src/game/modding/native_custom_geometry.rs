@@ -224,19 +224,25 @@ impl Game<'_> {
         }
         result
     }
-    /// Bake copies the instance route could not take onto the entity stream.
+    /// Bake copies the instance route could not take onto the entity stream, where a pack
+    /// draws them as block entities (`mark_model_copies`), one run per overlay.
     pub(super) fn commit_model_instances(
         &mut self,
         draw: &mut WorldGeometry,
         camera: DVec3,
         entities: &mut Vec<Vertex>,
     ) {
+        let mut run_overlay = None;
         for index in 0..draw.copy_count() {
             let copy = draw.copy(index);
             let Some(faces) = self.standalone_geometry.faces(copy.slot) else {
                 continue;
             };
             let start = entities.len();
+            if run_overlay != Some(copy.overlay) {
+                run_overlay = Some(copy.overlay);
+                self.mark_model_copies(start);
+            }
             super::minecarts::emit_model_faces(
                 faces.iter().copied().map(|face| (face, copy.light)),
                 world_geometry::row_major_3x4(copy.transform),

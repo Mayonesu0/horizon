@@ -284,6 +284,7 @@ mod tests {
             let stand = game.entity(13).unwrap();
             assert!(!stand.set_rotation(game, 30.0, 10.0));
             game.others.push(super::super::commands::OtherEntity {
+                knot_check: None,
                 join: Default::default(),
                 item_transformation: None,
                 id: 14,

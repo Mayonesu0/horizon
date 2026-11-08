@@ -15,8 +15,8 @@ use horizon_client::mobs::Mob;
 use horizon_world::attributes::{Modifier, Operation};
 use mod_api::first_person::Hand;
 use mod_api::{
-    AttributeModifier, AttributeOperation, EntityRef, EquipmentSlot, Identifier, LivingRef,
-    ModifierLifetime,
+    AttributeModifier, AttributeOperation, Direction, EntityRef, EquipmentSlot, Identifier,
+    LivingRef, ModifierLifetime,
 };
 
 /// A player's armour slots (`armor`, head first) by equipment slot.
@@ -425,6 +425,112 @@ impl Game<'_> {
         player.attributes.value(Some(key), kind).ok()
     }
 
+    /// `Entity.canUsePortal`: the decision the game's own portal trip runs —
+    /// a player's (alive, nobody's passenger, not asleep: the engine's own
+    /// `player_can_use_portal`, the one gate the client's portal entry, the
+    /// guest trip and this read answer), a mob's walk gate
+    /// (`mob_can_use_portal`, #1275's read: not a boss that never travels,
+    /// not a creaking bound to its heart, riding nothing, carrying no one
+    /// this side holds back). None for a stale handle, an armor stand or the
+    /// dragon: the portal walk carries neither as its own traveller.
+    pub(super) fn living_can_use_portal(&self, living: LivingRef) -> Option<bool> {
+        match self.native_living_read_target(living)? {
+            // The engine's own gate, the one the client's portal entry runs
+            // (`player_can_use_portal`, #943).
+            Target::Player => Some(self.player_can_use_portal()),
+            Target::Guest(conn) => {
+                let g = self.command_guest(conn)?;
+                let p = g.motion.as_deref()?;
+                Some(self.can_use_portal_of(p, g.vehicle.is_some(), g.sleeping))
+            }
+            Target::Mob(id) => {
+                let m = self.mobs.iter().find(|m| m.id == id && !m.removed)?;
+                Some(self.mob_portal_eligible(m))
+            }
+            _ => None,
+        }
+    }
+
+    /// `Mob.isWithinMeleeAttackRange`: the melee goal's own reach check — the
+    /// mob's box inflated by sqrt(2.04) − 0.6 over the target's box, or an
+    /// active item's attack range for a mob (a spear's reach) — whether this
+    /// living entity's next melee strike reaches `target`. The check is a
+    /// mob's; a player's attack reach is another rule (the interaction range
+    /// attribute), so a player answers None.
+    pub(super) fn living_in_melee_range(
+        &self,
+        living: LivingRef,
+        target: EntityRef,
+    ) -> Option<bool> {
+        let Target::Mob(id) = self.native_living_read_target(living)? else {
+            return None;
+        };
+        let m = self.mobs.iter().find(|m| m.id == id && !m.removed)?;
+        let [min, max] = self.entity_bounding_box(target)?;
+        let bounds = horizon_core::geometry::Aabb::new(
+            horizon_core::geometry::Vec3::new(min[0], min[1], min[2]),
+            horizon_core::geometry::Vec3::new(max[0], max[1], max[2]),
+        );
+        let w = self.mob_world_base(&[]);
+        Some(m.melee_reaches(&w, bounds))
+    }
+
+    /// `LivingEntity.canFreeze`: the decision the freeze tick itself runs — a
+    /// mob's (`ai::can_freeze`: not `#freeze_immune_entity_types`, no
+    /// `#freeze_immune_wearables` worn), a player's (`PlayerMotion::can_freeze`:
+    /// not a spectator, no immune armor). None for a stale handle, an armor
+    /// stand or the dragon.
+    pub(super) fn living_can_freeze(&self, living: LivingRef) -> Option<bool> {
+        match self.native_living_read_target(living)? {
+            Target::Mob(id) => {
+                let m = self.mobs.iter().find(|m| m.id == id && !m.removed)?;
+                let w = self.mob_world_base(&[]);
+                Some(horizon_client::mobs::ai::can_freeze(m, &w))
+            }
+            t => Some(self.native_player_body(t)?.can_freeze()),
+        }
+    }
+
+    /// `LivingEntity.canBreatheUnderwater`: the species' own — the air tick's
+    /// gate — a fish's, an axolotl's, a construct's (`breathes_water`). A
+    /// player drowns: false, their air ticks down. None for a stale handle,
+    /// an armor stand or the dragon.
+    pub(super) fn living_can_breathe_underwater(&self, living: LivingRef) -> Option<bool> {
+        match self.native_living_read_target(living)? {
+            Target::Mob(id) => Some(
+                self.mobs
+                    .iter()
+                    .find(|m| m.id == id && !m.removed)?
+                    .kind
+                    .flags
+                    .breathes_water,
+            ),
+            Target::Player | Target::Guest(_) => Some(false),
+            _ => None,
+        }
+    }
+
+    /// The bed a sleeper lies in, as its block faces
+    /// (`LivingEntity.getBedOrientation` over `BedBlock.getBedOrientation`):
+    /// the block at the sleeping position, its `facing` where that block is
+    /// one of `#minecraft:beds`. None where the sleeper keeps no position,
+    /// the block is not a bed, or the handle is stale.
+    pub(super) fn living_bed_orientation(&self, living: LivingRef) -> Option<Direction> {
+        let pos = self.living_sleeping_pos(living)?;
+        let w = self.mob_world_base(&[]);
+        let name = w.block_name(pos[0], pos[1], pos[2]);
+        if !w.has_tag("minecraft:beds", name) {
+            return None;
+        }
+        match w.prop(pos[0], pos[1], pos[2], "facing") {
+            Some("north") => Some(Direction::North),
+            Some("south") => Some(Direction::South),
+            Some("west") => Some(Direction::West),
+            Some("east") => Some(Direction::East),
+            _ => None,
+        }
+    }
+
     /// The entity's health (`LivingEntity.getHealth`; Paper's
     /// `Damageable#getHealth`). During a player's turn only that player
     /// resolves: the hub is out for their action, and other players'
@@ -803,6 +909,20 @@ impl Game<'_> {
         slot: EquipmentSlot,
         stack: Option<ItemStack>,
     ) -> bool {
+        self.write_living_equipment(living, slot, stack, false)
+    }
+    /// The write `native_living_set_equipment` makes (#932): with `defer`,
+    /// its equip sound and game event wait for the root commit of the open
+    /// transaction — an abort stays quiet — while the equipment and the
+    /// attribute map change at once, as later steps of the same transaction
+    /// read them.
+    pub(super) fn write_living_equipment(
+        &mut self,
+        living: LivingRef,
+        slot: EquipmentSlot,
+        stack: Option<ItemStack>,
+        defer: bool,
+    ) -> bool {
         // A client's copy changes only when the server says so.
         if self.remote.is_some() {
             return false;
@@ -838,8 +958,17 @@ impl Game<'_> {
                         })
                         .flatten()
                 });
-                let ctx = self.who_context(Some(horizon_client::mobs::Who::Mob(id)), None);
-                self.equip_item_effects([at.x, at.y, at.z], sound, equippable.is_some(), ctx);
+                if defer {
+                    self.after_commit(super::transactions::After::Equip {
+                        at: [at.x, at.y, at.z],
+                        sound,
+                        equips: equippable.is_some(),
+                        who: id,
+                    });
+                } else {
+                    let ctx = self.who_context(Some(horizon_client::mobs::Who::Mob(id)), None);
+                    self.equip_item_effects([at.x, at.y, at.z], sound, equippable.is_some(), ctx);
+                }
             }
             // The stack's attribute modifiers go on the live map at once, so
             // the next read — a hit's armor, a `LivingRef`'s — sees them (#941).
@@ -872,7 +1001,9 @@ impl Game<'_> {
             .slots_named(&Owner::Entity(t), slot_name(slot))
             .as_slice()
         {
-            [s] => self.slot_set(s, stack.clone()),
+            // This path owns onEquipItem below, including immediate writes.
+            // The generic stand slot writer must not emit it a second time.
+            [s] => self.slot_set_with_effects(s, stack.clone(), false),
             _ => false,
         };
         if let (true, Some(at), false) = (written, at, first_tick) {
@@ -888,9 +1019,18 @@ impl Game<'_> {
                 let (Target::Stand(id) | Target::Dragon(id)) = t else {
                     unreachable!("only a stand or the dragon gets here")
                 };
-                let ctx_who = Some(horizon_client::mobs::Who::Mob(id));
-                let ctx = self.who_context(ctx_who, None);
-                self.equip_item_effects([at.x, at.y, at.z], sound, equippable.is_some(), ctx);
+                if defer {
+                    self.after_commit(super::transactions::After::Equip {
+                        at: [at.x, at.y, at.z],
+                        sound,
+                        equips: equippable.is_some(),
+                        who: id,
+                    });
+                } else {
+                    let ctx_who = Some(horizon_client::mobs::Who::Mob(id));
+                    let ctx = self.who_context(ctx_who, None);
+                    self.equip_item_effects([at.x, at.y, at.z], sound, equippable.is_some(), ctx);
+                }
             }
         }
         written
@@ -922,7 +1062,7 @@ impl Game<'_> {
     /// side, not a spectator, not the first tick, another item): the equip
     /// sound when there is one, and the `equip` (the stack is equippable) or
     /// `unequip` game event.
-    fn equip_item_effects(
+    pub(in crate::game) fn equip_item_effects(
         &mut self,
         at: [f64; 3],
         sound: Option<String>,
@@ -1184,25 +1324,27 @@ mod tests {
                 game.audio.heard.clear();
                 game.guest_equipment_breaks.clear();
                 let random = game.world.random.clone();
-                // Pre-migration: decide all losses before mutating any slot.
-                let losses: [Option<(u32, u32)>; 4] = std::array::from_fn(|i| {
-                    let stack = game.armor[i].clone()?;
-                    let max = game.items().get(&stack.item)?.max_damage;
-                    let loss = game.wear(&stack, 1);
-                    (loss > 0).then_some((loss, max))
-                });
+                // Player.hurtArmor supplies FEET, LEGS, CHEST, HEAD;
+                // LivingEntity.doHurtEquipment finishes hurtAndBreak (including
+                // its effects/RNG) before the next slot's durability draw.
                 let mut broken = Vec::new();
-                for (index, (cell, loss)) in game.armor.iter_mut().zip(losses).enumerate() {
-                    if let (Some(stack), Some((loss, max))) = (cell.as_mut(), loss) {
-                        stack.damage = stack.damage.saturating_add(loss).min(max);
-                        if stack.damage >= max {
-                            broken.push((stack.clone(), index));
-                            *cell = None;
-                        }
+                for index in [3, 2, 1, 0] {
+                    let Some(mut stack) = game.armor[index].clone() else {
+                        continue;
+                    };
+                    let max = game.items().get(&stack.item).unwrap().max_damage;
+                    let loss = game.wear(&stack, 1);
+                    if loss == 0 {
+                        continue;
                     }
-                }
-                for (stack, index) in &broken {
-                    game.player_equipment_broke(super::super::armor_slot(*index), stack);
+                    stack.damage = stack.damage.saturating_add(loss).min(max);
+                    if stack.damage >= max {
+                        game.armor[index] = None;
+                        game.player_equipment_broke(super::super::armor_slot(index), &stack);
+                        broken.push(index);
+                    } else {
+                        game.armor[index] = Some(stack);
+                    }
                 }
                 let expected_armor = game.armor.clone();
                 let expected_events = game.guest_equipment_breaks.clone();
@@ -1215,15 +1357,15 @@ mod tests {
                     .map(|event| event.identifier.clone())
                     .collect();
                 let expected_random = game.world.random.next_float();
-                assert_eq!(broken.len(), 2);
+                assert_eq!(broken, [1, 0]);
                 if guest {
-                    assert_eq!(expected_events, [49, 50]);
+                    assert_eq!(expected_events, [50, 49]);
                 } else {
                     assert_eq!(expected_sounds.get("minecraft:entity.item.break"), Some(&1));
                     assert_eq!(expected_sounds.get("minecraft:block.anvil.break"), Some(&1));
                     assert_eq!(
                         expected_sound_order,
-                        ["minecraft:entity.item.break", "minecraft:block.anvil.break"]
+                        ["minecraft:block.anvil.break", "minecraft:entity.item.break"]
                     );
                 }
                 game.armor = armor.clone();
@@ -2381,5 +2523,228 @@ mod tests {
         for (i, n) in names.iter().enumerate() {
             assert!(!names[..i].contains(n), "{n} named twice");
         }
+    }
+    /// The living reads of #943 answer the engine's own decisions.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn the_engines_own_portal_melee_freeze_and_air_answers() {
+        use horizon_client::mobs::Mob;
+        use horizon_client::motion::PlayerMotion;
+        use horizon_core::geometry::Vec3;
+        use mod_api::Host;
+        super::super::native_entity_refs::tests::with_game(|game| {
+            // Two zombies an arm's length apart, and one a stride away.
+            let zombie = game
+                .res
+                .mob_types()
+                .get("minecraft:zombie")
+                .unwrap()
+                .clone();
+            game.mobs
+                .push(Mob::new(30, zombie.clone(), Vec3::new(0.5, 64.0, 0.5), 0.0));
+            game.mobs
+                .push(Mob::new(31, zombie.clone(), Vec3::new(1.5, 64.0, 0.5), 0.0));
+            game.mobs
+                .push(Mob::new(32, zombie, Vec3::new(5.5, 64.0, 0.5), 0.0));
+            let near = game.living(game.entity(30).unwrap()).unwrap();
+            let beside = game.entity(31).unwrap();
+            let far = game.entity(32).unwrap();
+
+            // The walk gate's own answers: alive and travelling, until dead.
+            {
+                let host: &dyn Host = game;
+                assert_eq!(near.can_use_portal(host), Some(true));
+            }
+            game.mobs[0].health = 0.0;
+            {
+                let host: &dyn Host = game;
+                assert_eq!(near.can_use_portal(host), Some(false));
+            }
+            game.mobs[0].health = 20.0;
+
+            // The melee goal's own reach: beside it, yes; a stride away, no.
+            // The freeze tick's decision, and a freeze-immune wearable on it.
+            // The air tick's gate: a zombie drowns.
+            {
+                let host: &dyn Host = game;
+                assert_eq!(near.in_melee_range(host, beside), Some(true));
+                assert_eq!(near.in_melee_range(host, far), Some(false));
+                assert_eq!(near.can_freeze(host), Some(true));
+                // The air tick's gate: whatever the species table holds for it.
+                assert_eq!(
+                    near.can_breathe_underwater(host),
+                    Some(game.mobs[0].kind.flags.breathes_water)
+                );
+            }
+            game.mobs[0].extra.equipment.set(
+                horizon_items::equipment::FEET,
+                Some(horizon_client::items::ItemStack::new(
+                    "minecraft:leather_boots",
+                    1,
+                )),
+            );
+            {
+                let host: &dyn Host = game;
+                assert_eq!(near.can_freeze(host), Some(false));
+            }
+
+            // A player's own answers: alive and awake, freezable, drowning.
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.lan_acting_uuid = Some(123);
+            game.lan_acting_entity = Some(20);
+            let player = game.living(game.entity(20).unwrap()).unwrap();
+            {
+                let host: &dyn Host = game;
+                assert_eq!(player.can_use_portal(host), Some(true));
+                assert_eq!(player.can_freeze(host), Some(true));
+                assert_eq!(player.can_breathe_underwater(host), Some(false));
+            }
+            game.player.as_mut().unwrap().sleeping = true;
+            {
+                let host: &dyn Host = game;
+                assert_eq!(player.can_use_portal(host), Some(false));
+            }
+            game.player.as_mut().unwrap().sleeping = false;
+            game.player.as_mut().unwrap().freeze_immune = true;
+            {
+                let host: &dyn Host = game;
+                assert_eq!(player.can_freeze(host), Some(false));
+            }
+
+            let squid = game.res.mob_types().get("minecraft:squid").unwrap().clone();
+            game.mobs
+                .push(Mob::new(33, squid, Vec3::new(7.5, 64.0, 0.5), 0.0));
+            let squid = game.living(game.entity(33).unwrap()).unwrap();
+            let golem_kind = game
+                .res
+                .mob_types()
+                .get("minecraft:copper_golem")
+                .unwrap()
+                .clone();
+            game.mobs
+                .push(Mob::new(34, golem_kind, Vec3::new(9.5, 64.0, 0.5), 0.0));
+            let golem = game.living(game.entity(34).unwrap()).unwrap();
+            {
+                let host: &dyn Host = game;
+                // A squid and a copper golem (#can_breathe_under_water)
+                // breathe water.
+                assert_eq!(squid.can_breathe_underwater(host), Some(true));
+                assert_eq!(golem.can_breathe_underwater(host), Some(true));
+            }
+            game.mobs.clear();
+            {
+                let host: &dyn Host = game;
+                assert_eq!(near.can_use_portal(host), None);
+                assert_eq!(near.in_melee_range(host, beside), None);
+                assert_eq!(near.can_freeze(host), None);
+                assert_eq!(near.can_breathe_underwater(host), None);
+            }
+        });
+    }
+
+    /// A sleeper's bed orientation is the bed block's own facing (#943):
+    /// the block at the sleeping position, where it is one of `#minecraft:beds`.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_sleepers_bed_orientation() {
+        use horizon_client::mobs::Mob;
+        use horizon_core::geometry::Vec3;
+        use mod_api::{Direction, Host};
+        super::super::native_entity_refs::tests::with_game(|game| {
+            // A floor with a red bed on it, facing north.
+            for (x, z) in (-1..=1).flat_map(|x| (-1..=1).map(move |z| (x, z))) {
+                let mut chunk = horizon_client::chunk::Chunk::empty(x, z);
+                chunk.lit = true;
+                game.world.chunks.insert((x, z), std::sync::Arc::new(chunk));
+            }
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            for x in -8..8 {
+                for z in -8..8 {
+                    game.world.set(x, 63, z, stone).unwrap();
+                }
+            }
+            let bed = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:red_bed")
+                .unwrap();
+            game.world.set(2, 63, 2, bed).unwrap();
+            game.world.set(3, 63, 2, bed).unwrap();
+
+            let villager = game
+                .res
+                .mob_types()
+                .get("minecraft:villager")
+                .unwrap()
+                .clone();
+            game.mobs
+                .push(Mob::new(30, villager, Vec3::new(0.5, 64.0, 0.5), 0.0));
+            let sleeper = game.living(game.entity(30).unwrap()).unwrap();
+            let host: &dyn Host = game;
+            // Awake: no sleeping position, no bed.
+            assert_eq!(sleeper.bed_orientation(host), None);
+            // Asleep in the bed: the block's own facing, the engine's own
+            // sleeping position naming the bed.
+            game.mobs[0].extra.ints[1] = 1;
+            horizon_client::mobs::villager::ext_mut(&mut game.mobs[0]).sleeping_pos =
+                Some([2, 63, 2]);
+            let host: &dyn Host = game;
+            assert_eq!(sleeper.bed_orientation(host), Some(Direction::North));
+            // A sleeping position that is not a bed answers none.
+            horizon_client::mobs::villager::ext_mut(&mut game.mobs[0]).sleeping_pos =
+                Some([0, 63, 0]);
+            let host: &dyn Host = game;
+            assert_eq!(sleeper.bed_orientation(host), None);
+            // A player asleep in the same bed answers the same facing.
+            game.player =
+                Some(horizon_client::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.lan_acting_uuid = Some(123);
+            game.lan_acting_entity = Some(20);
+            game.sleeping = Some([2, 63, 2]);
+            let player = game.living(game.entity(20).unwrap()).unwrap();
+            let host: &dyn Host = game;
+            assert_eq!(player.bed_orientation(host), Some(Direction::North));
+            game.mobs.clear();
+            let host: &dyn Host = game;
+            assert_eq!(sleeper.bed_orientation(host), None);
+        });
+    }
+
+    /// #943, review: a guest answers the same one portal rule over their
+    /// body and vehicle (`can_use_portal_of`), not a hand-rolled copy.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_guest_answers_the_one_portal_rule() {
+        use mod_api::Host;
+        super::super::native_guest_turn_tests::with_guests(|game| {
+            // The fixture leaves the guest without a body: give one, as a
+            // joined player's server record keeps.
+            game.lan.as_mut().unwrap().hub.update_guest(12, |g| {
+                g.motion = Some(Box::new(
+                    horizon_client::motion::PlayerMotion::new(
+                        game.motion,
+                        horizon_core::geometry::Vec3::new(3.0, 64.0, 5.0),
+                    )
+                    .unwrap(),
+                ))
+            });
+            let living = game.living(game.entity(12).unwrap()).unwrap();
+            let host: &dyn Host = game;
+            assert_eq!(living.can_use_portal(host), Some(true));
+            // Asleep: the rule's sleep half answers, over their body.
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(12, |g| g.sleeping = true);
+            let host: &dyn Host = game;
+            assert_eq!(living.can_use_portal(host), Some(false));
+        });
     }
 }

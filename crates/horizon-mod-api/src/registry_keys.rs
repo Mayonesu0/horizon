@@ -222,13 +222,16 @@ pub fn resolve_fluids(ids: &[&str]) -> Result<(), Vec<UnknownFluid>> {
 
 /// Resolve an engine fluid kind through the load-owned mapping.
 pub fn world_fluid_key(kind: horizon_world::fluid::FluidKind) -> Option<FluidKey> {
-    crate::parts::resolved_fluids()
-        .get()?
-        .world_fluids
-        .get(kind as usize)
-        .copied()
-        .flatten()
-        .map(FluidKey)
+    let names = crate::parts::resolved_fluids().get()?;
+    match kind.vanilla_index() {
+        Some(index) => names
+            .world_fluids
+            .get(usize::from(index))
+            .copied()
+            .flatten()
+            .map(FluidKey),
+        None => names.slots.get(kind.name()).copied().map(FluidKey),
+    }
 }
 
 /// Find a fluid key at a data-loading boundary.

@@ -98,6 +98,7 @@ mod generated {
     }
     pub(super) mod mod_api {
         pub(super) use super::super::ItemStack;
+        pub struct FluidModel;
         include!(concat!(env!("OUT_DIR"), "/dispatch_fixtures_api.rs"));
     }
     include!(concat!(env!("OUT_DIR"), "/mod_api_generated.rs"));
@@ -172,12 +173,14 @@ struct Parts {
     block_entities: Vec<&'static dyn BlockEntityPart>,
     items: Vec<&'static dyn ItemPart>,
     menus: Vec<&'static dyn MenuPart>,
+    fluids: Vec<&'static dyn FluidPart>,
 }
 static NO_PARTS: Parts = Parts {
     blocks: Vec::new(),
     block_entities: Vec::new(),
     items: Vec::new(),
     menus: Vec::new(),
+    fluids: Vec::new(),
 };
 thread_local! {
     static PARTS: std::cell::Cell<&'static Parts> = const { std::cell::Cell::new(&NO_PARTS) };
@@ -219,6 +222,9 @@ impl Parts {
     }
     fn menu<'k>(&self, _: impl FnOnce() -> Option<&'k str>) -> &[&'static dyn MenuPart] {
         &self.menus
+    }
+    fn fluid<'k>(&self, _: impl FnOnce() -> Option<&'k str>) -> &[&'static dyn FluidPart] {
+        &self.fluids
     }
 }
 fn entered_parts<'a, P: ?Sized>(

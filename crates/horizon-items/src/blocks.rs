@@ -20,6 +20,8 @@ pub enum Fluid {
     None,
     Water,
     Lava,
+    /// A mod's world fluid: a fluid to a bucket's ray, neither water nor lava to anything else.
+    Modded,
 }
 #[derive(Clone, Debug)]
 pub struct Sounds {
@@ -450,6 +452,14 @@ impl BlockFacts {
                 | "minecraft:seagrass"
                 | "minecraft:tall_seagrass" => (Fluid::Water, 8, false),
                 _ if prop("waterlogged") == Some("true") => (Fluid::Water, 8, false),
+                name if horizon_world::fluid::mod_fluid_named(name).is_some() => {
+                    let level: u8 = prop("level").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    match level {
+                        0 => (Fluid::Modded, 8, false),
+                        1..=7 => (Fluid::Modded, 8 - level, false),
+                        _ => (Fluid::Modded, 8, true),
+                    }
+                }
                 _ => (Fluid::None, 0, false),
             };
             let air = matches!(

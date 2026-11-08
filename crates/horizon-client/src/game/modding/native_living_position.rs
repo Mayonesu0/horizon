@@ -356,15 +356,19 @@ mod tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn random_teleport_drops_to_the_ground_and_honours_the_avoid_tag() {
-        with_game(|game| {
+        crate::game::entity::taken_pass_tests::in_both_dimensions(|game, balance| {
             floor_and_zombies(game);
             let zombie = game.living(game.entity(12).unwrap()).unwrap();
             let at = |game: &Game<'_>| game.mobs.iter().find(|m| m.id == 12).unwrap().position;
             // From six blocks up it lands on the floor, one block lower per
             // step down (`randomTeleport`).
-            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(game, |game| {
-                assert!(zombie.random_teleport(game, [4.5, 70.0, 4.5], None));
-            });
+            crate::game::entity::taken_pass_tests::assert_mob_spawn_survives(
+                game,
+                balance,
+                |game| {
+                    assert!(zombie.random_teleport(game, [4.5, 70.0, 4.5], None));
+                },
+            );
             assert_eq!(at(game), Vec3::new(4.5, 64.0, 4.5));
             assert_eq!(
                 game.mobs.iter().find(|m| m.id == 12).unwrap().previous,

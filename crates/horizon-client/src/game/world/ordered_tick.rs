@@ -11,6 +11,7 @@
 
 use super::{Game, Result};
 use horizon_client::join_seq::{JoinSeq, Joined};
+use horizon_client::random_source;
 use horizon_core::geometry::Vec3;
 use horizon_core::random::RandomSource as _;
 
@@ -29,6 +30,10 @@ pub(super) struct OrderedTicks {
     suffix_min: [JoinSeq; Batch::COUNT],
     /// The orbs' lava random, made on first use.
     lava_random: Option<horizon_core::random::LegacyRandom>,
+    /// Scratch schedule reused by each ordered pass in a level tick. The
+    /// entity lists can change between passes, so this only retains capacity;
+    /// entries are rebuilt from the live lists every time.
+    pending_buf: Vec<(JoinSeq, Pending)>,
 }
 
 /// The batches of the other kinds, in the order they tick.
@@ -63,6 +68,7 @@ pub(super) fn first_join<T: Joined>(list: &[T]) -> Option<JoinSeq> {
 impl Game<'_> {
     /// A level tick starts: what has joined so far ticks this tick.
     pub(super) fn begin_ordered_ticks(&mut self) {
+        let pending_buf = std::mem::take(&mut self.ordered.pending_buf);
         let firsts = [
             first_join(&self.armor_stands),
             first_join(&self.boats),
@@ -87,6 +93,7 @@ impl Game<'_> {
             done: None,
             suffix_min,
             lava_random: None,
+            pending_buf,
         };
     }
 
@@ -102,7 +109,8 @@ impl Game<'_> {
         let (done, born, announced) =
             (self.ordered.done, self.ordered.born, self.ordered.announced);
         let wanted = |j: JoinSeq| done.is_none_or(|d| j > d) && j < cut && j < born;
-        let mut pending: Vec<(JoinSeq, Pending)> = Vec::new();
+        let mut pending = std::mem::take(&mut self.ordered.pending_buf);
+        pending.clear();
         let mut offer = |j: JoinSeq, kind: Pending| {
             // Orbs are announced after their tick, always; TNT and falling
             // blocks that joined since the last packets wait for them.
@@ -125,7 +133,7 @@ impl Game<'_> {
         // run and again after an explosion, which can move or remove them.
         let mut obstacles: Option<horizon_client::entities::ObstacleGrid> = None;
         let mut nearby = Vec::new();
-        for (join, kind) in pending {
+        for (join, kind) in pending.drain(..) {
             self.ordered.done = Some(join);
             // ServerLevel.tick: only entities in entity-ticking chunks tick.
             match kind {
@@ -179,8 +187,20 @@ impl Game<'_> {
                     let Some(i) = self.orbs.locate(join) else {
                         continue;
                     };
+                    // ExperienceOrb.tick runs scanForMerges before it moves.
+                    // An orb absorbed here is gone before its own turn's
+                    // find_join finds it.
+                    if self.remote.is_none() {
+                        self.merge_orb(i);
+                    }
+                    let Some(i) = self.orbs.locate(join) else {
+                        continue;
+                    };
                     let followed = followed.get_or_insert_with(|| self.orb_followed());
                     let target = self.orb_target(i, followed);
+                    let Some(i) = self.orbs.locate(join) else {
+                        continue;
+                    };
                     // A block of slack around the move: gravity and the pull
                     // towards a player change it before it is made.
                     let o = &self.orbs[i];
@@ -198,7 +218,7 @@ impl Game<'_> {
                     let random = &mut self.ordered.lava_random;
                     let mut next_float = || {
                         random
-                            .get_or_insert_with(super::dispenser::entity_random)
+                            .get_or_insert_with(random_source::entity)
                             .next_float()
                     };
                     let stays = {
@@ -230,6 +250,7 @@ impl Game<'_> {
                 }
             }
         }
+        self.ordered.pending_buf = pending;
         if events && let Err(e) = self.process_level_events() {
             first_error.get_or_insert(e);
         }
@@ -249,7 +270,9 @@ impl Game<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::first_join;
     use horizon_client::chunk::Chunk;
+    use horizon_client::join_seq::{JoinList, JoinSeq, Joined as _};
     use horizon_core::position::ChunkPos;
     use std::sync::Arc;
 
@@ -288,5 +311,29 @@ mod tests {
             );
             assert_eq!(game.orbs.iter().map(|o| o.age).collect::<Vec<_>>(), [1, 1]);
         });
+    }
+
+    #[test]
+    fn first_join_uses_join_sequence_when_storage_is_reordered() {
+        struct E {
+            join: JoinSeq,
+        }
+        impl horizon_client::join_seq::Joined for E {
+            fn join_seq(&self) -> JoinSeq {
+                self.join
+            }
+            fn set_join_seq(&mut self, join: JoinSeq) {
+                self.join = join;
+            }
+        }
+        let mut list: JoinList<E> = JoinList::default();
+        for _ in 0..3 {
+            list.push(E {
+                join: JoinSeq::UNJOINED,
+            });
+        }
+        let first = list[0].join_seq();
+        list.swap(0, 2);
+        assert_eq!(first_join(&list), Some(first));
     }
 }

@@ -257,8 +257,6 @@
   "Game internals must be declared: run cargo horizon-mod internals sync in the mod's folder, then build again.": "Game internals must be declared: run cargo horizon-mod internals sync in the mod's folder, then build again.",
   "E_INTERNAL_PATH: {path} cannot be re-exported as a declared internal; declare its types or free functions instead.": "E_INTERNAL_PATH: {path} cannot be re-exported as a declared internal; declare its types or free functions instead.",
   "E_NOT_RAW: {mod}: {target} has no raw form: it is generic or takes impl Trait.": "E_NOT_RAW: {mod}: {target} has no raw form: it is generic or takes impl Trait.",
-  "E_NOT_SITE: {mod}: add `{line}` to crates/horizon-mod-api-gen/slots/{mod}.txt and rebuild the game; this call is not a compiled-in site.": "E_NOT_SITE: {mod}: add `{line}` to crates/horizon-mod-api-gen/slots/{mod}.txt and rebuild the game; this call is not a compiled-in site.",
-  "E_SITE_KIND: {mod}: injection {injection}: WRAP_WITH_CONDITION requires a unit-returning call.": "E_SITE_KIND: {mod}: injection {injection}: WRAP_WITH_CONDITION requires a unit-returning call.",
   "Easy": "简单",
   "Edit instance": "编辑实例",
   "Edit {name}": "编辑 {name}",
@@ -1207,5 +1205,10 @@
   "Can use the prebuilt game if one exists for your Horizon and it serves every enabled mod.": "Can use the prebuilt game if one exists for your Horizon and it serves every enabled mod.",
   "Native mods aren't sandboxed: they run with full access to your computer, like any program. Install only mods whose authors you trust. To play with one, build the game on the Mods page; a build may download Rust and other build tools.": "Native mods aren't sandboxed: they run with full access to your computer, like any program. Install only mods whose authors you trust. To play with one, build the game on the Mods page; a build may download Rust and other build tools.",
   "Native builds may download Rust and other build tools. Source builds compile the game on this computer.": "Native builds may download Rust and other build tools. Source builds compile the game on this computer.",
-  "{build} built and selected for its instance.": "{build} built and selected for its instance."
+  "{build} built and selected for its instance.": "{build} built and selected for its instance.",
+  "Found on this computer": "在这台电脑上找到",
+  "Your system keyring didn't answer within {seconds} seconds. Make sure it is running and unlocked, then restart the launcher.": "系统密钥环在 {seconds} 秒内没有响应。请确认它正在运行且已解锁，然后重新启动启动器。",
+  "Can't read {name}'s sign-in: {why}": "无法读取 {name} 的登录信息：{why}",
+  "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.": "Horizon 会运行数据包中的函数、函数标签、谓词、物品修饰器、配方、战利品表、进度、村民交易、伤害类型、大部分标签以及大部分世界生成内容（生物群系、地物、结构、维度）。世界预设等其他文件暂时还不会读取。",
+  "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.": "{title} 目前不会改变 Horizon 中的任何内容：Horizon 还不会读取它的 {files}。"
 }

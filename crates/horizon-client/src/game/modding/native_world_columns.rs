@@ -6,6 +6,25 @@ use super::native_world_edit::NativeHeightmap;
 pub use mod_api::game::NativeColumnBlocks;
 
 impl Game<'_> {
+    /// For a client mod: each column's height by `heightmap` in the world this window shows,
+    /// none for a column whose chunk this client does not hold. `Err` says why nothing was read:
+    /// no client world, or more than 65,536 columns (`MAX_COLUMNS`).
+    pub(super) fn client_surface_heights(
+        &self,
+        columns: &[(i32, i32)],
+        heightmap: NativeHeightmap,
+    ) -> Result<Vec<Option<i32>>, String> {
+        if !self.remote.as_ref().is_some_and(|r| r.logged_in) {
+            return Err("no client world is open".to_string());
+        }
+        if columns.len() > MAX_COLUMNS {
+            return Err(format!(
+                "{} columns, more than {MAX_COLUMNS} a call",
+                columns.len()
+            ));
+        }
+        Ok(self.loaded_column_heights(columns, heightmap))
+    }
     /// For a server mod: each column's height by `heightmap` in the authoritative level `dimension` (the one being
     /// ticked), none for a column not loaded. `Err` says why nothing was read: another dimension or a client of a
     /// server, or more than 65,536 columns (`MAX_COLUMNS`).

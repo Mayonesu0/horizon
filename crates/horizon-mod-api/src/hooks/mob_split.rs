@@ -18,6 +18,7 @@ pub trait Hooks {
         contract = "cancel",
         out = "cancel",
         neoforge = "MobSplitEvent",
+        paper = "SlimeSplitEvent",
         cancellable = true
     )]
     fn mob_split();

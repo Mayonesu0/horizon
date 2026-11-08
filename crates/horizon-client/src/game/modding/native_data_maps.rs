@@ -18,6 +18,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// (the registry's path: `minecraft` registries have no namespace folder).
 const REGISTRIES: [(&str, &str); 2] = [("minecraft:item", "item"), ("minecraft:block", "block")];
 
+/// The registries `types` are for that have data maps, in `REGISTRIES` order.
+pub(crate) fn registries_of(types: &[NativeDataMapType]) -> Vec<&'static str> {
+    REGISTRIES
+        .iter()
+        .map(|(registry, _)| *registry)
+        .filter(|registry| types.iter().any(|ty| ty.registry == *registry))
+        .collect()
+}
+
 /// The merged values of every registered type: `(registry, type id)` to the
 /// value of each entry that has one.
 #[derive(Default)]
@@ -177,6 +186,19 @@ impl DataMaps {
     }
 }
 
+impl Game<'_> {
+    /// Tell the mods the data maps of every registry with a type were merged
+    /// (`DataMapsUpdatedEvent`), once the server's tables hold them.
+    pub(in crate::game) fn announce_data_maps_updated(
+        &mut self,
+        cause: mod_api::DataMapsUpdateCause,
+    ) {
+        for registry in self.data_map_registries.clone() {
+            self.native_data_maps_updated(registry, cause);
+        }
+    }
+}
+
 // Native mods use these; nothing in Horizon does.
 #[allow(dead_code, reason = "native mod API (docs/native-mods.md)")]
 impl Game<'_> {
@@ -276,6 +298,19 @@ mod tests {
 
     fn get<'a>(maps: &'a DataMaps, entry: &str) -> Option<&'a Value> {
         maps.maps[&("minecraft:item".to_owned(), "mymod:fuel".to_owned())].get(entry)
+    }
+
+    #[test]
+    fn registries_with_a_type_are_listed_once_in_registry_order() {
+        let types = [
+            ty("mymod:b", "minecraft:block"),
+            ty("mymod:a", "minecraft:item"),
+            ty("mymod:c", "minecraft:block"),
+            ty("mymod:d", "minecraft:biome"),
+        ];
+        assert_eq!(registries_of(&types), ["minecraft:item", "minecraft:block"]);
+        assert!(registries_of(&[ty("mymod:d", "minecraft:biome")]).is_empty());
+        assert!(registries_of(&[]).is_empty());
     }
 
     #[test]

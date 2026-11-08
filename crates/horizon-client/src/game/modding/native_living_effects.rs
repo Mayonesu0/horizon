@@ -183,13 +183,14 @@ impl Game<'_> {
     }
 
     /// Whether the entity has `effect` (`LivingEntity.hasEffect`), using its resolved key.
-    /// False before effect resolution, for an armor stand, the dragon,
-    /// a stale handle or a client.
+    /// False before effect resolution, for an armor stand, the dragon or a stale handle;
+    /// on a client, for any entity but the local player, whose copy of what the server
+    /// sent it is read.
     pub(super) fn living_potion_affected(&self, living: LivingRef, effect: EffectKey) -> bool {
         let Some(def) = mod_api::__private::resolved_effect(effect) else {
             return false;
         };
-        match self.native_living_target(living) {
+        match self.native_living_read_target(living) {
             Some(t @ (Target::Player | Target::Guest(_))) => self
                 .native_living_player_effects(t)
                 .is_some_and(|effects| effects.get_registered(def.index).is_some()),
@@ -513,6 +514,15 @@ mod tests {
                 .list
                 .push(EffectInstance::new("darkness", 200, 0));
             game.sculk.darkness = (0.0, 0.0);
+            // The same effect reads whole on the client: `getEffect`, `getActiveEffects`, `hasEffect`.
+            let darkness = mod_api::__private::part_tests::effect_key("minecraft:darkness");
+            assert!(me.potion_affected(game, darkness));
+            assert_eq!(me.effect(game, darkness).map(|e| e.duration), Some(200));
+            assert_eq!(me.effects(game).map(|list| list.len()), Some(1));
+            assert!(!me.potion_affected(
+                game,
+                mod_api::__private::part_tests::effect_key("minecraft:nausea")
+            ));
             assert_eq!(
                 me.effect_blend_factor(
                     game,

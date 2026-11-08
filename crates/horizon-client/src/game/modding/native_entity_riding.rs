@@ -325,7 +325,11 @@ impl Game<'_> {
                 .unwrap_or(false);
         }
         let vehicle_id = match vehicle {
-            Target::Mob(id) | Target::Boat(id) | Target::Cart(id) => id,
+            Target::Mob(id)
+            | Target::Boat(id)
+            | Target::Cart(id)
+            | Target::Stand(id)
+            | Target::Other(id) => id,
             _ => return false,
         };
         if !matches!(rider, Target::Player | Target::Mob(_))
@@ -406,6 +410,11 @@ impl Game<'_> {
                     return false;
                 }
             }
+            Target::Stand(id) | Target::Other(id) => {
+                if self.seat(id).is_none() || (!force && !self.seated_passengers(id).is_empty()) {
+                    return false;
+                }
+            }
             _ => return false,
         }
         let allowed = match rider {
@@ -443,6 +452,13 @@ impl Game<'_> {
                         self.mount.jump_ticks = 0;
                         self.mount.jump_scale = 0.0;
                     }
+                    Target::Stand(id) | Target::Other(id) => {
+                        let Some(seat) = self.seat(id) else {
+                            return false;
+                        };
+                        self.board_seat(id, seat);
+                        return self.native_vehicle_id(rider) == Some(vehicle_id);
+                    }
                     _ => {}
                 }
                 self.riding = Some(vehicle_id);
@@ -460,12 +476,13 @@ impl Game<'_> {
 
     /// Attempts to board a vehicle through the shared server mount path.
     ///
-    /// Players and mobs can ride a mob, boat or minecart. Returns false for
+    /// Players and mobs can ride a mob, boat, minecart or generic seat entity. Returns false for
     /// unsupported entity pairs, stale or held-out handles, a full stored
     /// vehicle, a cycle, or a canceled mount or dismount. Mob vehicle capacity
     /// follows its species; minecarts store one passenger and boats store one
-    /// mob and up to two passengers in total. `force` bypasses normal
-    /// admission checks, not these storage limits. Player boarding cooldown and the strider's
+    /// mob and up to two passengers in total. Generic seats admit one passenger unless forced.
+    /// `force` bypasses normal admission checks, not these storage limits.
+    /// Player boarding cooldown and the strider's
     /// eye-in-lava admission check are not yet represented by the game.
     pub(super) fn entity_start_riding(
         &mut self,
@@ -538,6 +555,143 @@ mod tests {
                 Flow::Cancel
             }
         }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct SeatMountPayload {
+        entity: u32,
+        kind: String,
+        vehicle: u32,
+        vehicle_kind: String,
+        mounting: bool,
+    }
+
+    struct SeatMountObserver {
+        events: Arc<Mutex<Vec<SeatMountPayload>>>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[mod_api::__subscriptions]
+    impl Hooks for SeatMountObserver {
+        fn entity_mount(&self, _: &mut dyn ServerHost, event: &mut EntityMountEvent<'_>) -> Flow {
+            self.events.lock().unwrap().push(SeatMountPayload {
+                entity: event.entity,
+                kind: event.kind.into(),
+                vehicle: event.vehicle,
+                vehicle_kind: event.vehicle_kind.into(),
+                mounting: event.mounting,
+            });
+            if self.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn generic_seat_mount_payloads_cancellation_and_capacity() {
+        use horizon_client::entities::ArmorStand;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "seat_mount_observer",
+            Box::new(SeatMountObserver {
+                events: events.clone(),
+                cancel: cancel.clone(),
+            }),
+        )]
+        .into();
+        mod_api::testing::with_mods(mods, || {
+            super::super::native_entity_refs::tests::with_game(|game| {
+                game.options.dedicated = Some(Vec::new());
+                for (index, vehicle_kind) in [
+                    "minecraft:armor_stand",
+                    "minecraft:block_display",
+                    "minecraft:item_display",
+                    "minecraft:text_display",
+                    "minecraft:marker",
+                    "minecraft:interaction",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let id = 200 + index as u32 * 3;
+                    if vehicle_kind == "minecraft:armor_stand" {
+                        game.armor_stands.push(ArmorStand::new(id, Vec3::ZERO, 0.0));
+                    } else {
+                        game.others.push(super::super::commands::OtherEntity {
+                            knot_check: None,
+                            join: Default::default(),
+                            item_transformation: None,
+                            id,
+                            kind: vehicle_kind.into(),
+                            position: Vec3::ZERO,
+                            yaw: 0.0,
+                            pitch: 0.0,
+                        });
+                    }
+                    let vehicle = game.entity(id).unwrap();
+                    let rider = add_mob(game, id + 1, "minecraft:zombie", Vec3::ZERO);
+                    let second = add_mob(game, id + 2, "minecraft:skeleton", Vec3::ZERO);
+                    let payload = |entity, kind: &str, mounting| SeatMountPayload {
+                        entity,
+                        kind: kind.into(),
+                        vehicle: id,
+                        vehicle_kind: vehicle_kind.into(),
+                        mounting,
+                    };
+                    events.lock().unwrap().clear();
+
+                    // A canceled handle write reports the type but changes neither side.
+                    cancel.store(true, Ordering::SeqCst);
+                    assert!(!game.entity_start_riding(rider, vehicle, false));
+                    assert_eq!(rider.vehicle(game), None);
+                    assert_eq!(vehicle.passengers(game), Some(vec![]));
+                    assert_eq!(
+                        *events.lock().unwrap(),
+                        [payload(id + 1, "minecraft:zombie", true)]
+                    );
+
+                    cancel.store(false, Ordering::SeqCst);
+                    assert!(game.entity_start_riding(rider, vehicle, false));
+                    assert_eq!(rider.vehicle(game), Some(vehicle));
+                    // Default Entity.canAddPassenger requires an empty seat. No hook for refusal.
+                    assert!(!game.entity_start_riding(second, vehicle, false));
+                    assert_eq!(second.vehicle(game), None);
+                    assert_eq!(vehicle.passengers(game), Some(vec![rider]));
+                    assert_eq!(events.lock().unwrap().len(), 2);
+                    // /ride uses the same forced path, which permits more generic passengers.
+                    assert!(game.entity_start_riding(second, vehicle, true));
+                    assert_eq!(second.vehicle(game), Some(vehicle));
+                    assert_eq!(vehicle.passengers(game), Some(vec![rider, second]));
+
+                    cancel.store(true, Ordering::SeqCst);
+                    assert!(!game.entity_stop_riding(rider));
+                    assert_eq!(rider.vehicle(game), Some(vehicle));
+                    assert_eq!(vehicle.passengers(game), Some(vec![rider, second]));
+                    cancel.store(false, Ordering::SeqCst);
+                    assert!(game.entity_stop_riding(rider));
+                    assert!(game.entity_stop_riding(second));
+                    assert_eq!(rider.vehicle(game), None);
+                    assert_eq!(second.vehicle(game), None);
+                    assert_eq!(vehicle.passengers(game), Some(vec![]));
+                    assert_eq!(
+                        *events.lock().unwrap(),
+                        [
+                            payload(id + 1, "minecraft:zombie", true),
+                            payload(id + 1, "minecraft:zombie", true),
+                            payload(id + 2, "minecraft:skeleton", true),
+                            payload(id + 1, "minecraft:zombie", false),
+                            payload(id + 1, "minecraft:zombie", false),
+                            payload(id + 2, "minecraft:skeleton", false),
+                        ]
+                    );
+                }
+            });
+        });
     }
 
     struct UnleashObserver(Arc<Mutex<u32>>);
@@ -1212,6 +1366,7 @@ mod tests {
             assert_eq!(cow.dismount_location(game, LivingRef::new(player)), None);
             // An entity Horizon doesn't simulate keeps no box to stand on.
             game.others.push(super::super::commands::OtherEntity {
+                knot_check: None,
                 join: Default::default(),
                 item_transformation: None,
                 id: 132,

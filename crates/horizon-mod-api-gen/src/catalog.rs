@@ -59,6 +59,7 @@ pub enum PartKind {
     BlockEntity,
     Item,
     Menu,
+    Fluid,
 }
 
 /// A scoped hook: a Part method, called on the Parts attached to what `key` names.
@@ -682,6 +683,10 @@ mod tests {
         let scoped = find("pre_remove_side_effects");
         assert_eq!(scoped.scope.as_ref().unwrap().kind, PartKind::BlockEntity);
         assert_eq!(find("recipes_received").contract, Contract::Listen);
+        // `can_eat` changes Player.canEat's answer, so tools route an answer onto it.
+        let can_eat = find("can_eat");
+        assert_eq!(can_eat.contract, Contract::Replace);
+        assert_eq!(can_eat.out.as_deref(), Some("can_eat"));
         assert!(
             catalog
                 .hooks

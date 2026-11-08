@@ -4,7 +4,9 @@
 //! the main thread panics or `main` gets an error back. It stays a local file: the player
 //! reads it and shares it by hand.
 pub use mod_api::crash::{
-    NativeModCall, NativeModGuard, clear_detail, current_native_mod, enter_native_mod, set_detail,
+    ConvertedCall, ConvertedPackage, ConvertedPackageGuard, ConvertedPackages, NativeModCall,
+    NativeModGuard, clear_detail, current_converted_call, current_native_mod, enter_native_mod,
+    set_detail,
 };
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
@@ -23,7 +25,8 @@ thread_local! {
     static CAUGHT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// `message`, with the native mod hook this thread is inside, if any.
+/// `message`, with the native mod hook this thread is inside, if any, and the converted package
+/// the hook's runtime is executing.
 fn attributed(message: String) -> String {
     let Some(call) = mod_api::crash::current_native_call() else {
         return message;
@@ -32,10 +35,20 @@ fn attributed(message: String) -> String {
         .part
         .map(|part| format!(", part {part}"))
         .unwrap_or_default();
-    format!(
+    let mut out = format!(
         "{message}\nin native mod {}, hook {}{part}",
         call.id, call.hook
-    )
+    );
+    if let Some(scoped) = mod_api::crash::current_converted_call()
+        && scoped.runtime == call.id
+    {
+        let _ = write!(
+            out,
+            "\nin converted package {}, export {}, call site {}",
+            scoped.package, scoped.export, scoped.site
+        );
+    }
+    out
 }
 
 /// Runs `f`, and returns a panic in it as an error with the panic's message instead of letting
@@ -721,6 +734,85 @@ mod tests {
                 .ends_with("\nin native mod c, hook analog_output, part c::Gauge")
         );
         drop(part);
+    }
+
+    #[test]
+    fn a_panic_in_a_converted_package_names_the_runtime_package_export_and_site() {
+        let runtime = enter_native_mod(NativeModCall {
+            id: "portizon",
+            hook: "client_tick_pre",
+            part: None,
+        });
+        let packages = ConvertedPackages::new("portizon", ["example:mod"]);
+        let package = packages.package("example:mod").unwrap();
+        let scope = package
+            .enter("tick", "com.example.Foo.tick(Foo.java:42)")
+            .unwrap();
+        assert!(attributed("boom".into()).ends_with(
+            "\nin native mod portizon, hook client_tick_pre\n\
+             in converted package example:mod, export tick, \
+             call site com.example.Foo.tick(Foo.java:42)"
+        ));
+        // Another mod's hook inside the package keeps its own attribution: the runtime's
+        // package is not named for a crash in somebody else's code.
+        let other = enter_native_mod(NativeModCall {
+            id: "other",
+            hook: "tick",
+            part: None,
+        });
+        assert_eq!(
+            attributed("boom".into()),
+            "boom\nin native mod other, hook tick"
+        );
+        drop(other);
+        assert!(
+            attributed("boom".into()).contains("\nin converted package example:mod, export tick")
+        );
+        drop(scope);
+        assert!(
+            attributed("boom".into()).ends_with("\nin native mod portizon, hook client_tick_pre")
+        );
+        drop(runtime);
+        assert_eq!(attributed("boom".into()), "boom");
+    }
+
+    #[test]
+    fn a_panic_in_a_converted_package_becomes_a_report() {
+        let caught = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = caught.clone();
+        let _hook = PANIC_HOOK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if panic_message(info).contains("the guest crash") {
+                *sink.lock().unwrap() = Some(panic_report(info, "client"));
+            }
+        }));
+        let _runtime = enter_native_mod(NativeModCall {
+            id: "runtime",
+            hook: "dispatch",
+            part: None,
+        });
+        let packages = ConvertedPackages::new("runtime", ["example:mod"]);
+        let package = packages.package("example:mod").unwrap();
+        let _ = std::panic::catch_unwind(|| {
+            let _scope = package.enter("tick", "Foo.tick(Foo.java:42)").unwrap();
+            panic!("the guest crash");
+        });
+        std::panic::set_hook(previous);
+        let report = caught.lock().unwrap().take().expect("the hook saw it");
+        assert!(
+            report.error.ends_with(
+                "\nin native mod runtime, hook dispatch\n\
+                 in converted package example:mod, export tick, call site Foo.tick(Foo.java:42)"
+            ),
+            "{}",
+            report.error
+        );
+        // The scope is gone once the report is written.
+        assert_eq!(
+            attributed("boom".into()),
+            "boom\nin native mod runtime, hook dispatch"
+        );
     }
 
     fn report() -> Report {

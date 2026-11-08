@@ -237,6 +237,7 @@ pub(super) fn emit<'a>(
                     PartKind::BlockEntity => ("BlockEntityPart", "block_entity"),
                     PartKind::Item => ("ItemPart", "item"),
                     PartKind::Menu => ("MenuPart", "menu"),
+                    PartKind::Fluid => ("FluidPart", "fluid"),
                 };
                 if is_render {
                     return Err(format!("render hook {name} cannot be scoped"));

@@ -281,9 +281,12 @@ pub trait Hooks {
     fn panel_event();
     /// Initial saved data for a declared block entity (`EntityBlock.newBlockEntity`),
     /// fired inside the write that creates it (`LevelChunk.setBlockState`), on
-    /// a server and on a client of one. The declaration owns the type id; no
-    /// answer starts with an empty compound. The level is read-only, as
-    /// `newBlockEntity` gets no level.
+    /// a server and on a client of one. `state` is the actual placed state for a
+    /// block declared through `stateful_block_entity`; its properties are available
+    /// through the Host's state registry. The declaration owns the type id. No
+    /// answer creates no entity for a state-aware factory; other declared types
+    /// start with an empty compound. The level is read-only, as `newBlockEntity`
+    /// gets no level.
     #[hook(
         side = "both",
         contract = "replace",
@@ -331,7 +334,8 @@ pub trait Hooks {
     /// sent and whenever its block changes, on the server thread or, for a
     /// saved chunk sent past the view distance (`lan::far`), another one; a client's copy of the block
     /// entity (made by `native_block_entity` there) merges it into its `nbt`.
-    /// Leave it unset to send nothing.
+    /// Leave it unset to send no tag of yours. A block change puts the one-shot fields of
+    /// `ModBlockEntityView::set_client_update_fields` over it, and sends them alone when it is unset.
     #[hook(
         side = "server",
         contract = "replace",
@@ -725,19 +729,21 @@ pub trait Hooks {
         neoforge = "none (vanilla Item.hurtEnemy; NeoForge adds no event or extension for it); LivingDamageEvent.Post comes later"
     )]
     fn hurt_enemy();
-    /// A server tick of the stack a player carries in `slot`: where
+    /// A server tick of `stack`, the stack a player carries in `slot`: where
     /// `Inventory.tick` calls `Item.inventoryTick`, for every stack, each tick,
     /// `/tick freeze` included (it stops the world, not the player). `slot` is
     /// as `Inventory` saves it (0 to 35; the armour 100 feet to 103 head; -106
     /// the off hand), and `selected` says it is the held slot.
     /// `ItemPlace::PlayerSlot { player, slot }` reads and changes the stack,
     /// which stays in its slot: an emptied one empties the slot, and the
-    /// player's client gets the change. This runs often, so check the item
-    /// first. Server-side, for every living player of the world (the helpers
+    /// player's client gets the change. Only the `ItemPart`s attached to
+    /// `stack`'s item hear it. Server-side, for every living player of the world (the helpers
     /// read the acting one).
     #[hook(
         side = "server",
         contract = "listen",
+        scope = "item",
+        key = "stack",
         neoforge = "none (vanilla Item.inventoryTick; NeoForge adds no event or extension for it); PlayerTickEvent ticks the player, not each stack"
     )]
     fn inventory_tick();
@@ -810,7 +816,8 @@ pub trait Hooks {
         side = "server",
         contract = "cancel",
         out = "claimed",
-        neoforge = "PlayerInteractEvent.EntityInteract"
+        neoforge = "PlayerInteractEvent.EntityInteract",
+        paper = "PlayerInteractEntityEvent"
     )]
     fn entity_interact();
     /// A player left-clicks the block `state` at `pos`, `face` the face hit
@@ -878,9 +885,10 @@ pub trait Hooks {
     /// where it comes from (`getSourcePosition`). `victim` is where the entity stands and
     /// looks, and `weapon` the direct entity's weapon (`getWeaponItem`) when it is known.
     /// `container` holds the damage before any reduction: change its `new_damage`, or the
-    /// invulnerability ticks a fresh hit leaves (vanilla's 20), or set `canceled` and nothing
-    /// of `hurtServer` happens (no damage, hurt sound, knockback, cooldown, statistics or
-    /// criteria); a canceled hit on the ender dragon still counts as landed (`EnderDragon.hurt`
+    /// invulnerability ticks a fresh hit leaves (vanilla's 20), add a reduction modifier
+    /// (`add_reduction_modifier`) to change what one reduction takes off this hit, or set
+    /// `canceled` and nothing of `hurtServer` happens (no damage, hurt sound, knockback,
+    /// cooldown, statistics or criteria); a canceled hit on the ender dragon still counts as landed (`EnderDragon.hurt`
     /// returns true whatever `reallyHurt` did). It fires on every damage route, for players,
     /// mobs and the ender dragon. The level is the hit's: its blocks, random and own
     /// attachments; the hurt entity is in the middle of its hit.
@@ -1007,7 +1015,12 @@ pub trait Hooks {
     /// save: an edit made here to one of them (a neighbour's block entity, say)
     /// is not in that copy, and is dropped with the chunk.
     /// Server-side.
-    #[hook(side = "server", contract = "listen", neoforge = "ChunkEvent.Load")]
+    #[hook(
+        side = "server",
+        contract = "listen",
+        neoforge = "ChunkEvent.Load",
+        paper = "ChunkLoadEvent"
+    )]
     fn chunk_load();
     /// Chunk `chunk` of `dimension` left the world (NeoForge's
     /// `ChunkEvent.Unload`), with a level that closes for being empty too. Don't
@@ -1589,13 +1602,15 @@ pub trait Hooks {
     )]
     fn use_animation();
     /// `Player.canEat` for the food `stack`, from `Consumable.canConsume`
-    /// when eating starts: `can_eat` arrives with vanilla's (creative,
-    /// `can_always_eat`, or hungry). Clear it to refuse the food, set it to
-    /// let a full player eat. Both sides (the client starts eating as the
+    /// when eating starts: `vanilla_can_eat` is vanilla's answer (creative,
+    /// `can_always_eat`, or hungry). Answer `Some(false)` to refuse the food,
+    /// `Some(true)` to let a full player eat; `can_eat` left `None` keeps
+    /// `vanilla_can_eat`. Both sides (the client starts eating as the
     /// server does), so answer from the stack and the player alone.
     #[hook(
         side = "both",
-        contract = "listen",
+        contract = "replace",
+        out = "can_eat",
         host = "read",
         neoforge = "none (vanilla Player.canEat; NeoForge adds no event or extension for it)"
     )]
@@ -3066,6 +3081,7 @@ requires a farmer at work and `mob_griefing` enabled."#]
         contract = "cancel",
         out = "cancel",
         neoforge = "none (NeoForge has no such event)",
+        paper = "DragonEggFormEvent",
         cancellable = true,
         target = "horizon_client::game::native_hooks::base::GameLevel<'_>::native_dragon_egg_form"
     )]
@@ -3531,6 +3547,7 @@ requires a farmer at work and `mob_griefing` enabled."#]
         contract = "cancel",
         out = "cancel",
         neoforge = "none (NeoForge has no such event)",
+        paper = "MoistureChangeEvent",
         cancellable = true,
         target = "horizon_client::game::native_hooks::base::GameLevel<'_>::native_moisture_change"
     )]
@@ -4253,6 +4270,7 @@ requires a farmer at work and `mob_griefing` enabled."#]
         contract = "cancel",
         out = "cancel",
         neoforge = "PlayerSwitchHotbarSlotEvent.Pre",
+        paper = "PlayerItemHeldEvent",
         cancellable = true
     )]
     fn player_switch_hotbar_slot_pre();
@@ -4294,7 +4312,8 @@ requires a farmer at work and `mob_griefing` enabled."#]
     #[hook(
         side = "server",
         contract = "listen",
-        neoforge = "none (NeoForge has no such event; Bukkit's PlayerLevelChangeEvent)"
+        neoforge = "none (NeoForge has no such event; Bukkit's PlayerLevelChangeEvent)",
+        paper = "PlayerLevelChangeEvent"
     )]
     fn player_level_change();
     /// A server player selected a loom pattern, after the loom menu accepted the button. `pattern` is
@@ -4381,7 +4400,8 @@ requires a farmer at work and `mob_griefing` enabled."#]
     #[hook(
         side = "server",
         contract = "listen",
-        neoforge = "none (NeoForge has no such event; Bukkit's PlayerRecipeBookSettingsChange)"
+        neoforge = "none (NeoForge has no such event; Bukkit's PlayerRecipeBookSettingsChange)",
+        paper = "PlayerRecipeBookSettingsChangeEvent"
     )]
     fn player_recipe_book_settings_change();
     /// A recipe is about to be unlocked for a server player. Set `cancel` to keep it locked. The
@@ -4544,7 +4564,8 @@ requires a farmer at work and `mob_griefing` enabled."#]
         side = "server",
         contract = "replace",
         out = "result",
-        neoforge = "none (NeoForge has no such event)"
+        neoforge = "none (NeoForge has no such event)",
+        paper = "PrepareItemCraftEvent"
     )]
     fn prepare_item_craft();
     /// Enchanting offers were calculated for a server player at `pos`. Change `costs` before they are sent to the menu.
@@ -4559,7 +4580,8 @@ requires a farmer at work and `mob_griefing` enabled."#]
         side = "server",
         contract = "replace",
         out = "result",
-        neoforge = "none (NeoForge has no such event)"
+        neoforge = "none (NeoForge has no such event)",
+        paper = "PrepareSmithingEvent"
     )]
     fn prepare_smithing();
     /// A server projectile was added to the level. `player` is set only for
@@ -4724,7 +4746,8 @@ requires a farmer at work and `mob_griefing` enabled."#]
     #[hook(
         side = "server",
         contract = "listen",
-        neoforge = "none (NeoForge has no such event; Bukkit's WhitelistToggleEvent)"
+        neoforge = "none (NeoForge has no such event; Bukkit's WhitelistToggleEvent)",
+        paper = "WhitelistToggleEvent"
     )]
     fn whitelist_state_update();
     /// A timed world-border size change finished on the server, after its

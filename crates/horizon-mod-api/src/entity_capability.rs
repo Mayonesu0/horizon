@@ -2,9 +2,9 @@
 //! answer a capability, such as [`ENTITY_ITEMS`], beside the game's own (NeoForge's
 //! `Capabilities.Item.ENTITY`). A player's inventory is the game's own answer for a player.
 use super::{
-    Capability, ComponentId, Direction, EnergyHandler, EntityRef, FluidResource, Host, ItemPlace,
-    ItemResource, PREVENT_ARMOR_CHANGE, ProvidedBy, ResourceHandler, ServerHost, Tag, Transaction,
-    backend_of,
+    Capability, ComponentId, Direction, EnergyHandler, EntityRef, EquipmentSlot, FluidResource,
+    Host, ItemPlace, ItemResource, PREVENT_ARMOR_CHANGE, ProvidedBy, ResourceHandler, ServerHost,
+    Tag, Transaction, backend_of,
 };
 use std::marker::PhantomData;
 
@@ -41,8 +41,13 @@ pub const ENTITY_ITEMS: EntityCapabilityKey<dyn ResourceHandler<ItemResource>> =
         name: "horizon:entity_items",
         default: Some(|host, entity, ()| {
             if entity.kind(host)? != "minecraft:player" {
-                let size = backend_of(host)?.entity_container_size(entity.id())?;
-                return Some(Box::new(ContainerItems { entity, size }));
+                if let Some(size) = backend_of(host)?.entity_container_size(entity.id()) {
+                    return Some(Box::new(ContainerItems { entity, size }));
+                }
+                // A living entity without a container: its equipment (a mob's
+                // or an armor stand's), as NeoForge's wrapper answers it.
+                let size = backend_of(host)?.entity_equipment_size(entity.id())?;
+                return Some(Box::new(LivingEquipment { entity, size }));
             }
             let player = entity.uuid(host)?;
             Some(Box::new(PlayerItems { entity, player }))
@@ -185,6 +190,99 @@ impl ResourceHandler<ItemResource> for ContainerItems {
     }
 }
 
+/// The game's own [`ENTITY_ITEMS`] for a living non-player entity: its equipment slots, by
+/// `EquipmentSlot`'s ordinal (`LivingEntityEquipmentWrapper`), each an [`ItemPlace::Equipment`]
+/// whose write is the equipment write `set_equipment` makes. The armour and body slots take
+/// only what their `equippable` names for this entity's type; the hands take a stack of
+/// anything.
+struct LivingEquipment {
+    entity: EntityRef,
+    size: usize,
+}
+
+impl LivingEquipment {
+    /// Index `index` as the entity's equipment slot, while the entity is there.
+    fn place(&self, host: &dyn Host, index: usize) -> Option<ItemPlace> {
+        Some(ItemPlace::Equipment {
+            entity: self.entity.id(),
+            slot: self.slot(host, index)?,
+        })
+    }
+    /// The equipment slot `index` is, while the entity is there.
+    fn slot(&self, host: &dyn Host, index: usize) -> Option<EquipmentSlot> {
+        if index >= self.size || !live(host, self.entity) {
+            return None;
+        }
+        EquipmentSlot::ALL.get(index).copied()
+    }
+    /// The armour slots' names, by `EquipmentSlot`'s ordinal, `None` for a hand.
+    fn armour(slot: EquipmentSlot) -> Option<&'static str> {
+        match slot {
+            EquipmentSlot::Feet => Some("feet"),
+            EquipmentSlot::Legs => Some("legs"),
+            EquipmentSlot::Chest => Some("chest"),
+            EquipmentSlot::Head => Some("head"),
+            EquipmentSlot::Body => Some("body"),
+            _ => None,
+        }
+    }
+}
+
+impl ResourceHandler<ItemResource> for LivingEquipment {
+    fn size(&self, _: &mut dyn ServerHost) -> usize {
+        self.size
+    }
+    fn resource(&self, host: &mut dyn ServerHost, index: usize) -> Option<ItemResource> {
+        self.place(host, index)?.resource(host)
+    }
+    fn amount(&self, host: &mut dyn ServerHost, index: usize) -> u32 {
+        self.place(host, index)
+            .map_or(0, |place| place.amount(host))
+    }
+    fn capacity(&self, host: &mut dyn ServerHost, index: usize, resource: &ItemResource) -> u32 {
+        let Some(slot) = self.slot(host, index) else {
+            return 0;
+        };
+        match Self::armour(slot) {
+            // `Mob.canEquip`: only what its `equippable` names for this kind,
+            // one of it (`ArmorSlot.getMaxStackSize`).
+            Some(slot) if !equips(host, resource, slot, &kind_of(host, self.entity)) => 0,
+            Some(_) => max_stack(host, resource).min(1),
+            None => max_stack(host, resource),
+        }
+    }
+    fn insert(
+        &self,
+        host: &mut dyn ServerHost,
+        tx: &Transaction,
+        index: usize,
+        resource: &ItemResource,
+        amount: u32,
+    ) -> u32 {
+        let Some(place) = self.place(host, index) else {
+            return 0;
+        };
+        let limit = self.capacity(host, index, resource);
+        fill(host, tx, &place, resource, amount, limit)
+    }
+    fn extract(
+        &self,
+        host: &mut dyn ServerHost,
+        tx: &Transaction,
+        index: usize,
+        resource: &ItemResource,
+        amount: u32,
+    ) -> u32 {
+        self.place(host, index)
+            .map_or(0, |place| place.extract(host, tx, resource, amount))
+    }
+}
+
+/// The entity type `entity` is (`minecraft:zombie`), empty where the handle no longer reads.
+fn kind_of(host: &dyn Host, entity: EntityRef) -> String {
+    entity.kind(host).unwrap_or_default()
+}
+
 /// The player inventory's slots, by `Inventory`'s numbers (`PlayerInventoryWrapper`).
 const MAIN: usize = 36;
 const ARMOUR: [&str; 4] = ["feet", "legs", "chest", "head"];
@@ -247,10 +345,11 @@ fn max_stack(host: &dyn Host, resource: &ItemResource) -> u32 {
     }
 }
 
-/// Whether `resource` goes in the armour slot `slot` (`feet`...): its `equippable` names that
-/// slot and lets a player wear it (`ArmorSlot.mayPlace`, `Equippable.canBeEquippedBy`), its
-/// allowed entities a list, one id, or a `#` tag of entity types holding the player.
-fn equips(host: &dyn Host, resource: &ItemResource, slot: &str) -> bool {
+/// Whether `resource` goes in the armour slot `slot` (`feet`...) on an entity of type
+/// `entity_type`: its `equippable` names that slot and lets that kind wear it
+/// (`ArmorSlot.mayPlace`, `Equippable.canBeEquippedBy`), its allowed entities a list, one id,
+/// or a `#` tag of entity types holding it.
+fn equips(host: &dyn Host, resource: &ItemResource, slot: &str, entity_type: &str) -> bool {
     let id = ComponentId::new("minecraft:equippable").expect("a component id");
     let Some(equippable) = resource.value(host, &id) else {
         return false;
@@ -262,10 +361,10 @@ fn equips(host: &dyn Host, resource: &ItemResource, slot: &str) -> bool {
     named(equippable.get("slot"), slot)
         && match equippable.get("allowed_entities") {
             None => true,
-            Some(Tag::List(ids)) => ids.iter().any(|id| named(Some(id), "minecraft:player")),
+            Some(Tag::List(ids)) => ids.iter().any(|id| named(Some(id), entity_type)),
             Some(Tag::String(entities)) => match entities.to_string_lossy().strip_prefix('#') {
-                Some(tag) => host.entity_type_in_tag("minecraft:player", tag),
-                None => entities.to_string_lossy() == "minecraft:player",
+                Some(tag) => host.entity_type_in_tag(entity_type, tag),
+                None => entities.to_string_lossy() == entity_type,
             },
             _ => false,
         }
@@ -287,7 +386,7 @@ impl ResourceHandler<ItemResource> for PlayerItems {
             .checked_sub(MAIN)
             .and_then(|armour| ARMOUR.get(armour))
         {
-            Some(slot) if !equips(host, resource, slot) => 0,
+            Some(slot) if !equips(host, resource, slot, "minecraft:player") => 0,
             // `ArmorSlot.getMaxStackSize`.
             Some(_) => max_stack(host, resource).min(1),
             _ if index > OFF_HAND => 0,

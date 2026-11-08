@@ -339,6 +339,16 @@ pub(super) fn gameplay_tables(
                         })?,
                 );
             }
+            // #846: then the attributes mods add to existing types
+            // (`EntityAttributeModificationEvent`, fired after the creation
+            // event), on the same catalog rows.
+            let modifications = mod_api::__private::entity_attribute_modifications();
+            if !modifications.is_empty() {
+                motion.attributes = std::sync::Arc::new(with_mod_attribute_additions(
+                    &motion.attributes,
+                    modifications,
+                )?);
+            }
             Ok::<_, Box<dyn std::error::Error>>(motion)
         })
         .map_err(|e| e.to_string());
@@ -351,6 +361,49 @@ pub(super) fn gameplay_tables(
         facts,
         gameplay_projection,
     })
+}
+
+/// The catalog with the attributes mods add to existing entity types
+/// (#846, `EntityAttributeModificationEvent`), in registration order, so a
+/// later addition of the same attribute wins. An unknown attribute or a type
+/// without a row refuses the load, naming the type.
+pub(super) fn with_mod_attribute_additions(
+    catalog: &horizon_world::attributes::entity::Catalog,
+    modifications: &[mod_api::__private::EntityAttributeModification],
+) -> std::result::Result<horizon_world::attributes::entity::Catalog, String> {
+    let mut catalog = catalog.clone();
+    for modification in modifications {
+        catalog = catalog
+            .with_entity_additions(&modification.entity, &modification.attributes)
+            .map_err(|error| {
+                format!(
+                    "mod entity attribute additions to {}: {error}",
+                    modification.entity
+                )
+            })?;
+    }
+    Ok(catalog)
+}
+
+/// Each mob type mods added attributes to takes its grown catalog row
+/// (`with_mod_attribute_additions`) as its attribute map and spawn fields, as
+/// a declared set's type does (#845), so a new mob of the type spawns with
+/// what the live map answers. A type with no mob type (the player) builds
+/// its map from the catalog alone.
+pub(super) fn take_modified_attribute_rows(
+    types: &mut HashMap<String, horizon_client::mobs::MobType>,
+    catalog: &horizon_world::attributes::entity::Catalog,
+    modifications: &[mod_api::__private::EntityAttributeModification],
+) {
+    let modified: std::collections::BTreeSet<&str> = modifications
+        .iter()
+        .map(|modification| modification.entity.as_str())
+        .collect();
+    for entity in modified {
+        if let (Some(kind), Some(row)) = (types.get_mut(entity), catalog.entity_row(entity)) {
+            kind.take_attribute_row(Arc::new(row), catalog);
+        }
+    }
 }
 
 /// The synchronous launch loads both phases; an ordinary launch returns the

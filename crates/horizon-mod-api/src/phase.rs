@@ -1,6 +1,9 @@
 //! Restricted views for registration and data loading.
 pub use horizon_world::native_load_context::{DataLoadOrigin, LoopSide};
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 /// The permission boundary of the current owning thread. Only the game advances it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +345,87 @@ pub fn install_packages(native: &[PackageInfo], content: &[PackageInfo]) {
     );
 }
 
+/// The registries and settings registration reads: captured by the engine once, before the
+/// first registration hook runs, and the same for every registration step. Lookups are binary
+/// searches over sorted lists, so a clone of the context copies nothing.
+#[derive(Clone)]
+// exhaustive: its fields are private, so mods cannot build or destructure it
+pub struct RegistrationData {
+    /// Built-in registry names in ID order, by registry name.
+    pub(crate) registries: Arc<[(String, Arc<[String]>)]>,
+    /// Each loaded mod's settings, by mod ID then key.
+    pub(crate) settings: Arc<[(String, Arc<[(String, String)]>)]>,
+}
+
+impl RegistrationData {
+    /// The engine's snapshot: `registries` maps a registry name to its names in ID order,
+    /// `settings` a mod ID to its settings.
+    pub fn new(
+        registries: BTreeMap<String, Vec<String>>,
+        settings: BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Self {
+        Self {
+            registries: registries
+                .into_iter()
+                .map(|(name, ids)| (name, ids.into()))
+                .collect(),
+            settings: settings
+                .into_iter()
+                .map(|(id, values)| (id, values.into_iter().collect()))
+                .collect(),
+        }
+    }
+    fn registry(&self, name: &str) -> Option<Arc<[String]>> {
+        let at = self
+            .registries
+            .binary_search_by(|(known, _)| known.as_str().cmp(name));
+        Some(self.registries[at.ok()?].1.clone())
+    }
+    fn setting(&self, mod_id: &str, key: &str) -> Option<String> {
+        let mod_at = self
+            .settings
+            .binary_search_by(|(known, _)| known.as_str().cmp(mod_id))
+            .ok()?;
+        let values = &self.settings[mod_at].1;
+        let at = values
+            .binary_search_by(|(known, _)| known.as_str().cmp(key))
+            .ok()?;
+        Some(values[at].1.clone())
+    }
+}
+
+static REGISTRATION_DATA: OnceLock<RegistrationData> = OnceLock::new();
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static TEST_REGISTRATION_DATA: std::cell::RefCell<Option<RegistrationData>> = const { std::cell::RefCell::new(None) };
+}
+/// Runs `f` with `data` as the registration data, for tests.
+#[cfg(any(test, feature = "testing"))]
+pub fn with_test_registration_data<R>(data: RegistrationData, f: impl FnOnce() -> R) -> R {
+    TEST_REGISTRATION_DATA.set(Some(data));
+    let result = f();
+    TEST_REGISTRATION_DATA.set(None);
+    result
+}
+
+fn registration_data() -> Option<RegistrationData> {
+    #[cfg(any(test, feature = "testing"))]
+    if let Some(data) = TEST_REGISTRATION_DATA.with_borrow(Clone::clone) {
+        return Some(data);
+    }
+    REGISTRATION_DATA.get().cloned()
+}
+
+/// Records the registries and settings registration reads, once at startup, after the
+/// package inventory and before the first registration hook; a second call panics.
+pub fn install_registration_data(data: RegistrationData) {
+    assert!(
+        REGISTRATION_DATA.set(data).is_ok(),
+        "registration data already installed"
+    );
+}
+
 /// Read-only view of the startup package inventory, shared: cloning it copies no package.
 #[derive(Clone)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
@@ -376,8 +460,42 @@ impl LoadedMods {
     }
 }
 
+/// Why a registration read was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegistrationReadError {
+    /// The engine supplied no registry or settings data to this context.
+    Unavailable,
+    /// The registry name is not a namespaced identifier (`minecraft:item`).
+    InvalidRegistryName(String),
+    /// No built-in registry has this name.
+    UnknownRegistry(String),
+    /// The setting key is empty or names a path rather than one key.
+    InvalidSettingKey(String),
+    /// No loaded package has this ID, so it has no settings to read.
+    UnknownMod(String),
+}
+impl std::fmt::Display for RegistrationReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "registration read refused: {self:?}")
+    }
+}
+impl std::error::Error for RegistrationReadError {}
+
 /// A registration phase's view. Declarations go on the hook's event; there is
 /// no world, handle constructor, transaction or game Host at this point.
+///
+/// Every registration hook (`register`, `component_types`, `blocks`, `items`,
+/// `standalone_models` and the other `Register*` hooks) reads the same frozen view,
+/// captured once before the first of them runs, so an answer never depends on
+/// dispatch order or on which hook asks:
+///
+/// - [`mods`](Self::mods): the loaded packages.
+/// - [`registry`](Self::registry): the built-in registries, as `registries.json` lists them.
+///   Entries that mods declare during registration are not in it; a mod already has its own
+///   declarations on its event or registrar.
+/// - [`setting`](Self::setting): the settings on disk for the loaded packages when registration
+///   began. Later writes are not seen.
 ///
 /// ```compile_fail
 /// use mod_api::{Host, RegistrationContext};
@@ -399,18 +517,51 @@ impl LoadedMods {
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct RegistrationContext {
     pub(crate) mods: LoadedMods,
+    pub(crate) data: Option<RegistrationData>,
 }
 
 impl RegistrationContext {
     pub(crate) fn new() -> Self {
         Self {
             mods: LoadedMods::new(),
+            data: registration_data(),
         }
     }
 
     /// The loaded-mod view, independent of this phase's event or registrar.
     pub fn mods(&self) -> &LoadedMods {
         &self.mods
+    }
+
+    /// A built-in registry's names in ID order, for validating the keys a mod declares.
+    pub fn registry(&self, name: &str) -> Result<Arc<[String]>, RegistrationReadError> {
+        if crate::Identifier::parse_namespaced(name).is_none() {
+            return Err(RegistrationReadError::InvalidRegistryName(name.to_owned()));
+        }
+        self.data()?
+            .registry(name)
+            .ok_or_else(|| RegistrationReadError::UnknownRegistry(name.to_owned()))
+    }
+
+    /// A loaded mod's setting as it was when registration began: `Ok(None)` when the mod
+    /// has not set it. The key is one setting's name, not a path.
+    pub fn setting(
+        &self,
+        mod_id: &str,
+        key: &str,
+    ) -> Result<Option<String>, RegistrationReadError> {
+        if key.is_empty() || matches!(key, "." | "..") || key.contains(['/', '\\', '\0']) {
+            return Err(RegistrationReadError::InvalidSettingKey(key.to_owned()));
+        }
+        let data = self.data()?;
+        if self.mods.get(mod_id).is_none() {
+            return Err(RegistrationReadError::UnknownMod(mod_id.to_owned()));
+        }
+        Ok(data.setting(mod_id, key))
+    }
+
+    fn data(&self) -> Result<&RegistrationData, RegistrationReadError> {
+        self.data.as_ref().ok_or(RegistrationReadError::Unavailable)
     }
 }
 
@@ -864,6 +1015,101 @@ mod tests {
             assert_eq!(context.registry("block"), None);
             assert_eq!(context.setting("one", "mode"), None);
             assert_eq!(context.mods().ids().collect::<Vec<_>>(), ["one", "two"]);
+        });
+    }
+
+    #[test]
+    fn registration_hooks_read_one_snapshot_and_refuse_bad_reads() {
+        use crate::*;
+        use std::sync::Mutex;
+
+        /// Every answer the context gives this hook, for the keys the test names.
+        fn probe(cx: &RegistrationContext) -> Vec<String> {
+            let registry = |name| format!("{:?}", cx.registry(name));
+            let setting = |id, key| format!("{:?}", cx.setting(id, key));
+            vec![
+                registry("minecraft:item"),
+                registry("minecraft:missing"),
+                registry("item"),
+                registry(""),
+                setting("reader", "mode"),
+                setting("reader", "unset"),
+                setting("other", "mode"),
+                setting("absent", "mode"),
+                setting("reader", ""),
+                setting("reader", ".."),
+                setting("reader", "../mode"),
+                setting("reader", "a\\b"),
+            ]
+        }
+        struct Reader(Arc<Mutex<Vec<String>>>);
+        #[crate::__subscriptions]
+        impl Hooks for Reader {
+            fn register(&self, _: &mut dyn Registrar, cx: &RegistrationContext) {
+                *self.0.lock().unwrap() = probe(cx);
+            }
+            fn component_types(
+                &self,
+                cx: &RegistrationContext,
+                event: &mut ComponentTypesEvent<'_>,
+            ) {
+                *event.types = probe(cx);
+            }
+        }
+
+        let data = RegistrationData::new(
+            BTreeMap::from([(
+                "minecraft:item".to_owned(),
+                vec!["minecraft:air".to_owned(), "minecraft:stone".to_owned()],
+            )]),
+            BTreeMap::from([
+                (
+                    "reader".to_owned(),
+                    BTreeMap::from([("mode".to_owned(), "fast".to_owned())]),
+                ),
+                (
+                    "other".to_owned(),
+                    BTreeMap::from([("mode".to_owned(), "slow".to_owned())]),
+                ),
+            ]),
+        );
+
+        let registered = Arc::new(Mutex::new(Vec::new()));
+        let mods: Mods = vec![ModEntry::new(
+            "reader",
+            Box::new(Reader(registered.clone())),
+        )]
+        .into();
+        crate::install(mods.clone());
+        let expected = [
+            r#"Ok(["minecraft:air", "minecraft:stone"])"#,
+            r#"Err(UnknownRegistry("minecraft:missing"))"#,
+            r#"Err(InvalidRegistryName("item"))"#,
+            r#"Err(InvalidRegistryName(""))"#,
+            r#"Ok(Some("fast"))"#,
+            "Ok(None)",
+            r#"Ok(Some("slow"))"#,
+            r#"Err(UnknownMod("absent"))"#,
+            r#"Err(InvalidSettingKey(""))"#,
+            r#"Err(InvalidSettingKey(".."))"#,
+            r#"Err(InvalidSettingKey("../mode"))"#,
+            r#"Err(InvalidSettingKey("a\\b"))"#,
+        ];
+        with_test_packages(&["reader", "other"], || {
+            with_test_registration_data(data, || {
+                crate::install_parts(&mods, &crate::parts::tests::rule_schema()).unwrap();
+                assert_eq!(*registered.lock().unwrap(), expected);
+                let mut types = Vec::new();
+                dispatch_component_types(&RegistrationContext::new(), &mut types);
+                assert_eq!(types, expected, "a later step reads the same snapshot");
+            });
+            // No engine view: every read is refused, and a bad name or key still says so.
+            crate::install_parts(&mods, &crate::parts::tests::rule_schema()).unwrap();
+            let refused = registered.lock().unwrap().clone();
+            assert_eq!(refused[0], "Err(Unavailable)");
+            assert_eq!(refused[2], r#"Err(InvalidRegistryName("item"))"#);
+            assert_eq!(refused[4], "Err(Unavailable)");
+            assert_eq!(refused[8], r#"Err(InvalidSettingKey(""))"#);
         });
     }
 }

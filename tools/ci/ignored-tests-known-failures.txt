@@ -32,7 +32,6 @@ horizon-client-render gfx::pack_post::material_tests::terrain_material_samplers_
 horizon-client-render gfx::pack_post::weather_depth_tests::rain_depth_controls_writes_for_rain_snow_and_fallbacks adapter flaky
 
 # Known failures on main.
-horizon-client-lib mobs::cem::tests::names_reach_horizons_models horizon-rust/horizon#8426
 # Load starvation: the far-decoration worker runs at idle priority against a fixed 30 s deadline, so it passes on
 # an idle host.
 horizon-client-lib vanillagen::lod::tests::decorated_lod_refines_real_seed_canopies_and_all_dimensions horizon-rust/horizon#8583 flaky

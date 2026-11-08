@@ -163,7 +163,7 @@ impl Game<'_> {
             if g.lan.is_none() {
                 return Err("command harness: no hub".into());
             }
-            g.start_server_trip(conn, plan.dim, Some(plan));
+            g.start_server_trip(conn, plan.dim, Some(plan), false);
             Ok(())
         })
     }
@@ -204,6 +204,7 @@ impl Game<'_> {
                     // in those chunks (areEntitiesActuallyLoadedAndTicking):
                     // after a dimension change they come back from the save.
                     self.spawn_loaded_entities();
+                    self.world.entities_pending.clear();
                     return Ok(());
                 }
             }
@@ -267,9 +268,19 @@ impl Game<'_> {
                     self.chat_capture = Some(Vec::new());
                     self.cmds.results = Some(Vec::new());
                     self.harness_owner(|g| {
+                        let previous = g.command_source;
+                        if op["source"].as_str() == Some("console") {
+                            // Actual server source; permission-only `as_console`
+                            // otherwise keeps the connected owner's entity.
+                            g.command_source = Some(super::commands::execute::Source {
+                                silent: false,
+                                ..g.server_source()
+                            });
+                        }
                         g.as_console(|g| {
                             g.run_command(command.strip_prefix('/').unwrap_or(command))
                         });
+                        g.command_source = previous;
                         Ok(())
                     })?;
                     let messages = self.chat_capture.take().unwrap_or_default();
@@ -449,6 +460,8 @@ impl Game<'_> {
                                         .iter()
                                         .any(|(key, _)| *key == (x, z))
                             }) {
+                                // The oracle waits for `areEntitiesLoaded` too.
+                                g.world.entities_pending.clear();
                                 break;
                             }
                             if Instant::now() > deadline {
@@ -647,6 +660,46 @@ impl Game<'_> {
                                     .map(|p| p.conn)
                             })
                             .ok_or("boat click: owner not connected")?;
+                        g.lan_guest_packet(
+                            conn,
+                            horizon_protocol::packets::play::Serverbound::Interact(
+                                horizon_protocol::packets::play::Interact {
+                                    id: id as i32,
+                                    hand: 0,
+                                    location: [0.0; 3],
+                                    secondary: false,
+                                },
+                            ),
+                        );
+                        Ok(())
+                    })?;
+                }
+                "mob_interact" => {
+                    // The owner's real Interact packet on a live mob, by UUID.
+                    let uuid = u128::from_str_radix(
+                        &op["uuid"]
+                            .as_str()
+                            .ok_or("mob click: missing UUID")?
+                            .replace('-', ""),
+                        16,
+                    )?;
+                    self.in_owner_level(|g| -> Result<()> {
+                        let id = g
+                            .mob_by_uuid(horizon_client::lan::playerdata::uuid_ints(uuid))
+                            .filter(|id| g.mobs.iter().any(|m| m.id == *id && !m.removed))
+                            .ok_or("mob click: missing live mob")?;
+                        let owner = g.serving.as_ref().ok_or("mob click: no server")?.owner;
+                        let conn = g
+                            .lan
+                            .as_ref()
+                            .and_then(|h| {
+                                h.hub
+                                    .guests
+                                    .iter()
+                                    .find(|p| p.uuid == owner && p.placed)
+                                    .map(|p| p.conn)
+                            })
+                            .ok_or("mob click: owner not connected")?;
                         g.lan_guest_packet(
                             conn,
                             horizon_protocol::packets::play::Serverbound::Interact(
@@ -1067,10 +1120,34 @@ impl Game<'_> {
                         std::array::from_fn(|i| op["pos"][i].as_i64().unwrap_or(0) as i32);
                     self.harness_owner(|g| {
                         let state = g.world.block(x, y, z);
-                        if &*g.res.facts().get(state).name != "minecraft:crafter" {
-                            return Err("command harness: crafter tick without a crafter".into());
+                        let name = &*g.res.facts().get(state).name;
+                        if name != "minecraft:crafter" && name != "minecraft:dispenser" {
+                            return Err(
+                                "command harness: crafter tick without a crafter or dispenser"
+                                    .into(),
+                            );
                         }
                         g.dispense_from(horizon_core::position::BlockPos::new(x, y, z), state)
+                    })?;
+                }
+                "sync_randoms" => {
+                    // docs/parity-workflow.md "Randoms that repeat". The script
+                    // runs on the server thread, whose uniquifier this sets.
+                    let field = |key: &str| {
+                        op[key]
+                            .as_i64()
+                            .ok_or_else(|| format!("sync_randoms: no {key}"))
+                    };
+                    let (uniquifier, entity_id, level_seed) = (
+                        field("uniquifier")?,
+                        field("entity_id")?,
+                        field("level_seed")?,
+                    );
+                    horizon_client::random_source::set_thread_uniquifier(uniquifier)?;
+                    self.harness_owner(|g| {
+                        g.next_entity = u32::try_from(entity_id)?;
+                        g.world.random = horizon_core::random::LegacyRandom::new(level_seed);
+                        Ok(())
                     })?;
                 }
                 "break" => {

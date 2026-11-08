@@ -10,6 +10,9 @@ use std::{
     },
 };
 
+#[path = "residency/table.rs"]
+pub mod table;
+
 /// Authoritative entity storage families, excluding the dragon's eight parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {

@@ -12,7 +12,10 @@ use mod_api::EntityRef;
 
 impl Game<'_> {
     /// A player's body, where it is kept now.
-    fn native_player_body(&self, t: Target) -> Option<&horizon_client::motion::PlayerMotion> {
+    pub(super) fn native_player_body(
+        &self,
+        t: Target,
+    ) -> Option<&horizon_client::motion::PlayerMotion> {
         match t {
             Target::Player => self.player.as_ref(),
             Target::Guest(conn) => self.lan.as_ref()?.hub.guest(conn)?.motion.as_deref(),
@@ -98,7 +101,7 @@ impl Game<'_> {
             return None;
         };
         let m = self.mobs.iter().find(|m| m.id == id)?;
-        let source = Damage::of(Self::damage_kind(damage_type));
+        let source = Damage::of(Self::damage_kind(&self.motion.health.damage, damage_type));
         Some(m.refuses_damage(&source))
     }
 

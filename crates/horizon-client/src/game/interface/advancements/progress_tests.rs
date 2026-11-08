@@ -145,7 +145,11 @@ fn progress_events_capture_each_players_full_mutation_state() {
             game.world_root = scratch.join("world");
             let pack = game.world_root.join("datapacks/test");
             std::fs::create_dir_all(pack.join("data/testmod/function")).unwrap();
-            std::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
+            std::fs::write(
+                pack.join("pack.mcmeta"),
+                r#"{"pack":{"description":"test","pack_format":121}}"#,
+            )
+            .unwrap();
             std::fs::write(
                 pack.join("data/testmod/function/reward.mcfunction"),
                 "scoreboard players add @s reward_hits 1\n",

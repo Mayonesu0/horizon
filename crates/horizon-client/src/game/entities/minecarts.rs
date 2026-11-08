@@ -11,6 +11,9 @@ mod lifetime_tests;
 use super::{Game, Hit, InteractTarget, Keys, entity::Entity};
 use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
+use horizon_client::fast_hash::FxHashSet;
+use horizon_client::join_seq::{JoinList, ListStamp};
+use horizon_client::mobs::{Mob, seen_grid::SeenGrid};
 use horizon_client::{
     blocks::Fluid,
     collisions::SceneCollisions,
@@ -19,8 +22,9 @@ use horizon_client::{
     mesher::Vertex,
     mobs::{Part, Species, Who, anim::Poses, riders},
     particles::{ParticleOptions, ParticleType},
+    random_source,
     scoreboard::pushable_by,
-    sound_engine::{CartSound, PlayResult, SoundEngine, SoundInstance, Sounds},
+    sound_engine::{CartSound, PlayResult, SoundInstance, Sounds},
 };
 use horizon_core::{
     geometry::{Aabb, Vec3, trig},
@@ -233,6 +237,92 @@ pub(super) fn forget_unreadable_display(
 ) {
     if c.custom_display.as_ref().is_some_and(|t| !resolves(t)) {
         c.custom_display = None;
+    }
+}
+/// The carts' and mobs' boxes for one tick's cart pushes (`push_from_cart`,
+/// `pickup_from_cart`), so a cart reads its neighbours instead of every cart and
+/// every mob of the level. Both answer in slot order, as the scans did.
+///
+/// The cart grid follows each ticked cart ([`CartIndex::moved`]); it is
+/// rebuilt once the list's length changed (a cart gone or added), and dropped
+/// after a command, which can move or replace any cart
+/// ([`CartIndex::forget_carts`]). The mob grid holds until the mob
+/// list's next write ([`ListStamp`]). A native mod's hook can move either kind
+/// unseen, so with mods loaded both scans stay.
+#[derive(Default)]
+pub(super) struct CartIndex {
+    carts: Option<(SeenGrid, Vec<u32>)>,
+    /// The grid, and the carts a mob rides.
+    mobs: Option<(ListStamp, SeenGrid, FxHashSet<u32>)>,
+    near: Vec<u32>,
+}
+impl CartIndex {
+    fn usable() -> bool {
+        mod_api::__private::mods().is_empty()
+    }
+    /// The cart in slot `i` has these bounds now.
+    fn moved(&mut self, i: usize, bounds: Aabb) {
+        if let Some((grid, ids)) = &mut self.carts
+            && i < ids.len()
+        {
+            grid.update(i, bounds);
+        }
+    }
+    fn forget_carts(&mut self) {
+        self.carts = None;
+    }
+    /// The slots of the carts whose box may meet `area`, for the cart in slot
+    /// `i` (just moved); false: scan them all.
+    fn carts_near(&mut self, carts: &[Minecart], i: usize, area: Aabb, out: &mut Vec<u32>) -> bool {
+        if !Self::usable() {
+            return false;
+        }
+        let fresh = |ids: &[u32]| ids.len() == carts.len() && ids[i] == carts[i].id;
+        if !self.carts.as_ref().is_some_and(|(_, ids)| fresh(ids)) {
+            self.carts = Some((
+                SeenGrid::new(carts.iter().map(Minecart::bounds)),
+                carts.iter().map(|c| c.id).collect(),
+            ));
+        }
+        let Some((grid, ids)) = &mut self.carts else {
+            return false;
+        };
+        grid.update(i, carts[i].bounds());
+        if !grid.candidates(area, out) {
+            return false;
+        }
+        if out.iter().any(|&j| ids[j as usize] != carts[j as usize].id) {
+            // A cart was replaced in place: start over next time.
+            self.carts = None;
+            return false;
+        }
+        true
+    }
+    /// The slots of the mobs whose box may meet `area` into `out`, and
+    /// whether a mob rides cart `cart`; None: scan them all.
+    fn mobs_near(
+        &mut self,
+        mobs: &JoinList<Mob>,
+        cart: u32,
+        area: Aabb,
+        out: &mut Vec<u32>,
+    ) -> Option<bool> {
+        if !Self::usable() {
+            return None;
+        }
+        if !self
+            .mobs
+            .as_ref()
+            .is_some_and(|(stamp, ..)| *stamp == mobs.stamp())
+        {
+            self.mobs = Some((
+                mobs.stamp(),
+                SeenGrid::new(mobs.iter().map(Mob::bounds)),
+                mobs.iter().filter_map(|m| m.extra.mount).collect(),
+            ));
+        }
+        let (_, grid, mounted) = self.mobs.as_ref()?;
+        grid.candidates(area, out).then(|| mounted.contains(&cart))
     }
 }
 /// Where the cart `id` is in `carts`: at `hint` (where it was a moment ago,
@@ -1290,22 +1380,34 @@ impl Game<'_> {
         }
     }
     /// Runs `push_from_cart` for the cart being ticked (`c` is a copy of the
-    /// stored one): the stored cart is replaced by `c` for the push and `c`
-    /// takes back what the push changed.
-    fn push_from_ticked_cart(&mut self, c: &mut Minecart) {
-        let Some(i) = self.carts.iter().position(|x| x.id == c.id) else {
+    /// stored one, kept at `slot`): the stored cart is replaced by `c` for the
+    /// push and `c` takes back what the push changed. The rolled loot stays
+    /// with `c`: the stored cart is without it for the whole tick
+    /// (`tick_carts_now`), and a mineshaft's chest cart carries its whole roll
+    /// as NBT.
+    fn push_from_ticked_cart(&mut self, c: &mut Minecart, slot: usize, index: &mut CartIndex) {
+        let Some(i) = cart_at(&self.carts, c.id, slot) else {
             return;
         };
+        let loot = c.loot.take();
         if !self.store_cart_back(i, c.clone()) {
             return;
         }
-        self.push_from_cart(i);
+        self.push_from_cart(i, index);
         if let Some(i) = self.carts.iter().position(|x| x.id == c.id) {
             *c = self.carts[i].clone();
         }
+        c.loot = loot;
     }
     /// `AbstractMinecart.tick` for one cart; returns false once it is gone.
-    fn tick_cart(&mut self, c: &mut Minecart, intent: [f64; 2]) -> bool {
+    /// `slot` is where the cart is stored (where to look first).
+    fn tick_cart(
+        &mut self,
+        c: &mut Minecart,
+        intent: [f64; 2],
+        slot: usize,
+        index: &mut CartIndex,
+    ) -> bool {
         c.tick_count += 1;
         c.previous = c.position;
         c.previous_yaw = c.yaw;
@@ -1365,7 +1467,7 @@ impl Game<'_> {
         // OldMinecartBehavior.tick ends with pushAndPickupEntities, before
         // AbstractMinecart.tick's updateFluidInteraction. The experiment still
         // uses this fallback until its per-move pickup/push retry is ported.
-        self.push_from_ticked_cart(c);
+        self.push_from_ticked_cart(c, slot, index);
         // AbstractMinecart.tick: updateFluidInteraction, a stream pushes the cart.
         c.in_water = c
             .push_by_fluid(&self.world, &self.res.motion().fluids, &self.loop_context)
@@ -1528,6 +1630,7 @@ impl Game<'_> {
         let at = [c.position.x, c.position.y, c.position.z];
         // The cart is the explosion's source: it is gone before the blast
         // looks for entities, so it can't hit itself.
+        let silent = self.entity_silent(c.id);
         if let Some(i) = self.carts.iter().position(|x| x.id == c.id) {
             self.eject_cart_mobs(i);
         }
@@ -1541,7 +1644,15 @@ impl Game<'_> {
         self.combat.rail_proof_blast = c.fuse >= 0;
         self.combat.explosion_in_water = self.bounds_in_water(c.bounds());
         self.combat.explosion_direct = Some(c.id);
-        let _ = self.with_hive_emptying_blast(|g| g.server_explode(at, power, interaction, false));
+        let _ = self.with_hive_emptying_blast(|g| {
+            g.server_explode_from(
+                at,
+                power,
+                interaction,
+                false,
+                super::explosion::ExplosionSource::default().with_silence(silent),
+            )
+        });
         self.combat.explosion_direct = None;
         self.combat.explosion_in_water = false;
         self.combat.rail_proof_blast = false;
@@ -1652,10 +1763,16 @@ impl Game<'_> {
     /// cart `i`'s own tick: each other cart in its box (0.2 wider on each
     /// side) gets `push(cart i)`. Running it per cart, after that cart moved
     /// and before the next one does, is what splits stacked carts apart.
-    fn push_from_cart(&mut self, i: usize) {
+    fn push_from_cart(&mut self, i: usize, index: &mut CartIndex) {
         let reach = f64::from(0.2f32);
         let hitbox = self.carts[i].bounds().inflate(Vec3::new(reach, 0.0, reach));
-        for j in 0..self.carts.len() {
+        let mut near = std::mem::take(&mut index.near);
+        if !index.carts_near(&self.carts, i, hitbox, &mut near) {
+            near.clear();
+            near.extend(0..self.carts.len() as u32);
+        }
+        for &j in &near {
+            let j = j as usize;
             if j == i || !hitbox.intersects(self.carts[j].bounds()) {
                 continue;
             }
@@ -1712,13 +1829,14 @@ impl Game<'_> {
             self.carts.update(j, |c| c.velocity = nt);
             self.carts.update(i, |c| c.velocity = no);
         }
-        self.pickup_from_cart(i);
+        index.near = near;
+        self.pickup_from_cart(i, index);
     }
     /// `OldMinecartBehavior.pushAndPickupEntities` for living entities in cart
     /// `i`'s box (0.2 wider on each side): only a rideable cart moving at
     /// `horizontalDistanceSqr() >= 0.01` picks up; an eligible mob boards an
     /// empty cart (`startRiding`); others get `Entity.push`.
-    fn pickup_from_cart(&mut self, i: usize) {
+    fn pickup_from_cart(&mut self, i: usize, index: &mut CartIndex) {
         let v = self.carts[i].velocity;
         if self.carts[i].kind != CartKind::Rideable || v.x * v.x + v.z * v.z < 0.01 {
             return;
@@ -1727,22 +1845,31 @@ impl Game<'_> {
         let id = self.carts[i].id;
         let pos = self.carts[i].position;
         let hitbox = self.carts[i].bounds().inflate(Vec3::new(reach, 0.0, reach));
+        let mut near = std::mem::take(&mut index.near);
+        let mounted = index.mobs_near(&self.mobs, id, hitbox, &mut near);
         let mut occupied = self.riding == Some(id)
             || self.ridden_by_guest(id)
-            || self.mobs.iter().any(|m| m.extra.mount == Some(id));
-        let teams = self.mob_teams();
-        let candidates: Vec<u32> = (0..self.mobs.len())
-            .filter(|&j| {
-                let m = &self.mobs[j];
-                // The box first: it turns away nearly every mob of the level.
-                if m.removed || m.extra.mount == Some(id) || !hitbox.intersects(m.bounds()) {
-                    return false;
-                }
-                m.pushable() && pushable_by(None, teams.of(Who::Mob(m.id)), true)
-            })
-            .map(|j| self.mobs[j].id)
-            .collect();
-        drop(teams);
+            || mounted.unwrap_or_else(|| self.mobs.iter().any(|m| m.extra.mount == Some(id)));
+        if mounted.is_none() {
+            near.clear();
+            near.extend(0..self.mobs.len() as u32);
+        }
+        // The box first: it turns away nearly every mob of the level.
+        near.retain(|&j| {
+            let m = &self.mobs[j as usize];
+            !m.removed && m.extra.mount != Some(id) && hitbox.intersects(m.bounds())
+        });
+        let candidates: Vec<u32> = if near.is_empty() {
+            Vec::new()
+        } else {
+            let teams = self.mob_teams();
+            near.iter()
+                .map(|&j| &self.mobs[j as usize])
+                .filter(|m| m.pushable() && pushable_by(None, teams.of(Who::Mob(m.id)), true))
+                .map(|m| m.id)
+                .collect()
+        };
+        index.near = near;
         for mob in candidates {
             // By id: a mod's mount hook may have removed mobs since the list
             // was made, which moves the others' indices.
@@ -1855,6 +1982,7 @@ impl Game<'_> {
         let ridden = self.guest_vehicles();
         // By id: an exploding cart can destroy or prime others mid-loop.
         let ids: Vec<u32> = self.carts.iter().map(|c| c.id).collect();
+        let mut index = CartIndex::default();
         let mut hint = 0;
         for &id in &ids {
             let Some(i) = cart_at(&self.carts, id, hint) else {
@@ -1883,7 +2011,7 @@ impl Game<'_> {
                 let loot = game.carts.update(i, |c| c.loot.take());
                 let mut c = game.carts[i].clone();
                 c.loot = loot;
-                let alive = game.tick_cart(&mut c, [0.0; 2]);
+                let alive = game.tick_cart(&mut c, [0.0; 2], i, &mut index);
                 if c.kind == CartKind::Hopper && c.enabled {
                     game.hopper_cart_suck(&mut c);
                 }
@@ -1892,6 +2020,7 @@ impl Game<'_> {
                 };
                 if alive {
                     let due = std::mem::take(&mut c.command_due);
+                    index.moved(i, c.bounds());
                     game.store_cart_back(i, c);
                     due
                 } else {
@@ -1903,6 +2032,7 @@ impl Game<'_> {
             });
             if due {
                 self.perform_cart_command(id);
+                index.forget_carts();
             }
             // After the ticked cart is stored: a mod reads and changes the cart as it is now.
             self.native_tick_post_one(&round, id, kind);
@@ -1917,7 +2047,7 @@ impl Game<'_> {
                 hint = i + 1;
                 let p = self.carts[i].position;
                 if ticking(p.x.floor() as i32, p.z.floor() as i32) {
-                    self.cart_lava_tick(id);
+                    self.cart_lava_tick(id, i);
                 }
             }
         }
@@ -1927,9 +2057,9 @@ impl Game<'_> {
     /// own `isInLava`. The second breaks the cart, or primes a TNT minecart
     /// (`MinecartTNT.destroy` for a fire source). A cart has no `baseTick`,
     /// so the fire `lavaIgnite` lights never burns it.
-    fn cart_lava_tick(&mut self, id: u32) {
+    fn cart_lava_tick(&mut self, id: u32, slot: usize) {
         for _ in 0..2 {
-            let Some(i) = self.carts.iter().position(|c| c.id == id) else {
+            let Some(i) = cart_at(&self.carts, id, slot) else {
                 return;
             };
             if !self.in_lava(self.carts[i].bounds()) {
@@ -1959,7 +2089,7 @@ impl Game<'_> {
             .retain(|id| carts.iter().any(|c| c.id == *id));
         for cart in &carts {
             if !self.cart_sounds.contains(&cart.id) {
-                let instance = SoundInstance::minecart(cart, SoundEngine::unseeded());
+                let instance = SoundInstance::minecart(cart, random_source::create());
                 let (_, res) = self.audio.play_instance(instance, false);
                 if res != PlayResult::NotStarted {
                     self.cart_sounds.insert(cart.id);
@@ -1973,7 +2103,7 @@ impl Game<'_> {
             let mut started = true;
             for underwater in [true, false] {
                 let instance =
-                    SoundInstance::riding_minecart(cart, underwater, SoundEngine::unseeded());
+                    SoundInstance::riding_minecart(cart, underwater, random_source::create());
                 let (_, res) = self.audio.play_instance(instance, false);
                 if res == PlayResult::NotStarted {
                     started = false;
@@ -2011,7 +2141,7 @@ impl Game<'_> {
         let id = self.carts[i].id;
         let result = self.with_entity_held_out(id, |game| {
             let mut c = game.carts[i].clone();
-            let alive = game.tick_cart(&mut c, intent);
+            let alive = game.tick_cart(&mut c, intent, i, &mut CartIndex::default());
             if let Some(p) = game.player.as_mut() {
                 game.previous_position = p.position;
                 p.position = Vec3::new(c.position.x, c.position.y + SEAT, c.position.z);
@@ -2050,6 +2180,9 @@ impl Game<'_> {
             return;
         }
         self.riding = None;
+        if self.dismount_in_portal(self.carts[i].position) {
+            return;
+        }
         let target = self.cart_player_dismount_target(i);
         if let Some(p) = self.player.as_mut() {
             p.position = target;
@@ -2426,6 +2559,30 @@ impl Game<'_> {
         }
         self.hurt_cart(i, damage, creative, false);
     }
+    /// `Containers.dropContents(level, entity, container)` at a cart's
+    /// position: each slot, an empty one too, from a spot in the cart's block
+    /// in pieces of 10 to 30 with the level random's scatter, no pickup delay.
+    fn scatter_cart_contents(&mut self, at: [f64; 3], items: &[Option<ItemStack>]) {
+        let cell = horizon_core::position::BlockPos::new(
+            at[0].floor() as i32,
+            at[1].floor() as i32,
+            at[2].floor() as i32,
+        );
+        for stack in items {
+            let count = stack.as_ref().map_or(0, |s| s.count);
+            let pieces =
+                horizon_world::level::removal::drop_item_stack(&mut self.world.random, cell, count);
+            if let Some(stack) = stack {
+                for piece in pieces {
+                    let piece_stack = ItemStack {
+                        count: piece.count,
+                        ..stack.clone()
+                    };
+                    self.spawn_item(piece_stack, piece.pos, piece.motion, 0);
+                }
+            }
+        }
+    }
     /// `VehicleEntity.hurtServer`: shake, add the damage, break past 40 (at
     /// once for creative players); TNT minecarts prime instead when moving
     /// or hurt by fire or an explosion (`damageSourceIgnitesTnt`).
@@ -2500,11 +2657,15 @@ impl Game<'_> {
                     .rules
                     .bool_at(horizon_client::gamerules::vanilla::ENTITY_DROPS)
                 {
-                    for s in c.items.iter().flatten() {
-                        self.spawn_item(s.clone(), at, [0.0, 0.1, 0.0], 10);
-                    }
+                    // AbstractMinecartContainer.remove: dropContents.
+                    self.scatter_cart_contents(at, &c.items);
                     if !creative {
-                        self.spawn_item(ItemStack::new(c.kind.item(), 1), at, [0.0, 0.1, 0.0], 10);
+                        // `spawnAtLocation`: an ItemEntity's own motion.
+                        self.spawn_item_own(ItemStack::new(c.kind.item(), 1), at, 10);
+                        // `chestVehicleDestroyed` drops the emptied container
+                        // again, which only draws each slot's spot.
+                        let empty = vec![None; c.items.len()];
+                        self.scatter_cart_contents(at, &empty);
                     }
                 }
             }
@@ -2702,6 +2863,7 @@ impl Game<'_> {
                 continue;
             }
             let entity_start = out.len();
+            self.mark_motion(entity_start, Self::MOTION_OBJECT | u64::from(c.id));
             // The per-entity jitter (offsetSeed) that keeps stacked carts from z-fighting.
             let seed = i64::from(c.id).wrapping_mul(493_286_711);
             let seed = seed
@@ -2811,6 +2973,7 @@ impl Game<'_> {
             skull: &|_| None,
             glyph: &|c| self.gui.atlas.glyph_cell(c),
             glyphs: self.gui.atlas.font.epoch(),
+            font: Some(&self.gui.atlas.font),
             dynamic_visible: None,
         };
         self.res
@@ -3181,7 +3344,7 @@ mod tests {
                 let mut cart = Minecart::new(1, kind, at);
                 cart.velocity = Vec3::new(0.0, 0.0, 1.0);
                 cart.first_tick = false;
-                game.tick_cart(&mut cart, [0.0; 2]);
+                game.tick_cart(&mut cart, [0.0; 2], 0, &mut CartIndex::default());
                 cart.velocity.horizontal_distance()
             };
             // On a rail, the first iteration's cap.
@@ -3197,6 +3360,120 @@ mod tests {
         });
     }
 
+    /// The cart index hands a moved cart every cart a scan finds in its box,
+    /// as the carts move one by one, after one is gone, and after a command
+    /// (which forgets the index) put another cart in a slot.
+    #[test]
+    fn cart_index_finds_what_a_scan_finds() {
+        use super::{CartIndex, CartKind, Minecart};
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |m: f64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 1_000_000) as f64 / 1_000_000.0 * m
+        };
+        // Clustered, so most carts have neighbours.
+        let mut carts: Vec<Minecart> = (0..300)
+            .map(|id| Minecart::new(id, CartKind::Chest, Vec3::new(next(40.0), 64.0, next(40.0))))
+            .collect();
+        let mut index = CartIndex::default();
+        let mut near = Vec::new();
+        let check = |index: &mut CartIndex, carts: &[Minecart], i: usize, near: &mut Vec<u32>| {
+            let area = carts[i].bounds().inflate(Vec3::new(0.2, 0.0, 0.2));
+            let scan: Vec<u32> = (0..carts.len() as u32)
+                .filter(|&j| area.intersects(carts[j as usize].bounds()))
+                .collect();
+            if index.carts_near(carts, i, area, near) {
+                let found: Vec<u32> = near
+                    .iter()
+                    .copied()
+                    .filter(|&j| area.intersects(carts[j as usize].bounds()))
+                    .collect();
+                assert_eq!(found, scan, "cart {i}");
+            }
+        };
+        for round in 0..3 {
+            for i in 0..carts.len() {
+                // Each cart moves up to two blocks before its push.
+                carts[i].position.x += next(4.0) - 2.0;
+                carts[i].position.z += next(4.0) - 2.0;
+                check(&mut index, &carts, i, &mut near);
+                index.moved(i, carts[i].bounds());
+                if i == 100 && round == 1 {
+                    carts.remove(50);
+                }
+                if i == 200 && round == 2 {
+                    let at = carts[0].position;
+                    carts[150] = Minecart::new(999, CartKind::Rideable, at);
+                    index.forget_carts();
+                }
+                if i >= carts.len() - 1 {
+                    break;
+                }
+            }
+        }
+        assert!(index.carts.is_some(), "the index was used");
+    }
+    /// The cart index hands a cart every mob a scan finds in its box, and
+    /// knows whether a mob rides it, however the mob list changed since.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn cart_index_finds_the_mobs_a_scan_finds() {
+        use super::{CartIndex, CartKind, Minecart};
+        use horizon_client::mobs::Mob;
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let kinds: Vec<_> = ["minecraft:zombie", "minecraft:chicken", "minecraft:ravager"]
+                .iter()
+                .map(|k| game.res.mob_types().get(*k).cloned().unwrap())
+                .collect();
+            let mut seed = 0x2545_F491_4F6C_DD1Du64;
+            let mut next = |m: f64| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed % 1_000_000) as f64 / 1_000_000.0 * m
+            };
+            for id in 0..200u32 {
+                let at = Vec3::new(next(40.0), 64.0, next(40.0));
+                let kind = kinds[id as usize % kinds.len()].clone();
+                game.mobs.push(Mob::new(id + 1, kind, at, 0.0));
+            }
+            let carts: Vec<Minecart> = (0..60)
+                .map(|id| {
+                    Minecart::new(
+                        1000 + id,
+                        CartKind::Rideable,
+                        Vec3::new(next(40.0), 64.0, next(40.0)),
+                    )
+                })
+                .collect();
+            let mut index = CartIndex::default();
+            let mut near = Vec::new();
+            let mut check = |game: &Game<'_>, what: &str| {
+                for c in &carts {
+                    let area = c.bounds().inflate(Vec3::new(0.2, 0.0, 0.2));
+                    let scan: Vec<u32> = (0..game.mobs.len() as u32)
+                        .filter(|&j| area.intersects(game.mobs[j as usize].bounds()))
+                        .collect();
+                    let ridden = game.mobs.iter().any(|m| m.extra.mount == Some(c.id));
+                    let mounted = index.mobs_near(&game.mobs, c.id, area, &mut near);
+                    assert_eq!(mounted, Some(ridden), "{what}: cart {}", c.id);
+                    near.retain(|&j| area.intersects(game.mobs[j as usize].bounds()));
+                    assert_eq!(near, scan, "{what}: cart {}", c.id);
+                }
+            };
+            check(game, "as placed");
+            game.mobs[10].position = carts[3].position;
+            game.mobs[11].extra.mount = Some(carts[4].id);
+            check(game, "one moved, one boarded");
+            let kind = kinds[0].clone();
+            game.mobs
+                .insert(0, Mob::new(500, kind, carts[5].position, 0.0));
+            game.mobs.retain(|m| m.id % 7 != 0);
+            check(game, "added and removed");
+        });
+    }
     #[test]
     fn mob_walking_into_a_cart_pushes_it_by_a_twentieth() {
         // Issue #6776: a villager at x=0.13 next to a cart at x=0.5 east-west.
@@ -3670,7 +3947,7 @@ mod tnt_impact_tests {
             let mut cart = Minecart::new(1, CartKind::Tnt, at);
             cart.velocity = velocity;
             for _ in 0..40 {
-                if !game.tick_cart(&mut cart, [0.0; 2]) {
+                if !game.tick_cart(&mut cart, [0.0; 2], 0, &mut super::CartIndex::default()) {
                     result = true;
                     break;
                 }
@@ -3702,5 +3979,64 @@ mod tnt_impact_tests {
             Vec3::new(8.3, 64.0, 4.5),
             Vec3::new(0.4, 0.0, 0.4)
         ));
+    }
+}
+
+#[cfg(test)]
+mod cart_push_tests {
+    use super::{CartKind, Minecart};
+    use horizon_client::{items::ItemStack, save::RolledLoot};
+    use horizon_core::geometry::Vec3;
+
+    /// Two chest carts pushed apart (`OldMinecartBehavior.pushAndPickupEntities`):
+    /// the push runs on copies of the ticked cart, and the one still holding
+    /// its mineshaft roll keeps the roll, so it is saved as its loot table.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_pushed_chest_cart_keeps_its_rolled_loot() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+            );
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            for x in 4..13 {
+                for z in 4..13 {
+                    game.world.set(x, 63, z, stone).unwrap();
+                }
+            }
+            let items = vec![Some(ItemStack::new("minecraft:rail", 12)); 27];
+            let loot = RolledLoot {
+                pos: (8, 64, 8),
+                table: "minecraft:chests/abandoned_mineshaft".into(),
+                seed: Some(42),
+                items: horizon_client::save::encode_items(&items),
+            };
+            let mut rolled = Minecart::new(1, CartKind::Chest, Vec3::new(8.3, 64.0, 8.5));
+            rolled.items = items;
+            rolled.loot = Some(loot.clone());
+            game.carts.push(rolled);
+            // Facing along X (yaw 0) and 0.4 apart on X: the old behaviour pushes.
+            game.carts
+                .push(Minecart::new(2, CartKind::Chest, Vec3::new(8.7, 64.0, 8.5)));
+            for _ in 0..5 {
+                game.tick_carts();
+            }
+            let cart = |id| game.carts.iter().find(|c| c.id == id).unwrap();
+            assert!(
+                cart(2).position.x - cart(1).position.x > 0.4,
+                "the carts were pushed apart: {} {}",
+                cart(1).position.x,
+                cart(2).position.x
+            );
+            assert_eq!(cart(1).loot.as_ref(), Some(&loot));
+            assert_eq!(cart(2).loot, None);
+        });
     }
 }

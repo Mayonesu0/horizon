@@ -8,8 +8,13 @@ impl GameLevel<'_> {
     /// answer starts with an empty compound. The level is read-only, as
     /// `newBlockEntity` gets no level.
     #[inline(always)]
-    pub(in crate::game) fn native_block_entity(&self, block: &str, entity: &mut Option<Compound>) {
-        self.fire_block_entity(block, entity);
+    pub(in crate::game) fn native_block_entity(
+        &self,
+        block: &str,
+        state: BlockStateId,
+        entity: &mut Option<Compound>,
+    ) {
+        self.fire_block_entity(block, state, entity);
     }
     /// A hopper at `pos` is about to pick up `count` of `item`. Set `cancel` to leave the dropped stack in the world. Server-side.
     #[inline(always)]
@@ -1196,7 +1201,8 @@ impl Game<'_> {
     /// sent and whenever its block changes, on the server thread or, for a
     /// saved chunk sent past the view distance (`lan::far`), another one; a client's copy of the block
     /// entity (made by `native_block_entity` there) merges it into its `nbt`.
-    /// Leave it unset to send nothing.
+    /// Leave it unset to send no tag of yours. A block change puts the one-shot fields of
+    /// `ModBlockEntityView::set_client_update_fields` over it, and sends them alone when it is unset.
     pub(in crate::game) fn native_block_entity_update_tag(
         pos: [i32; 3],
         entity: &ModBlockEntity,
@@ -3510,12 +3516,18 @@ impl Game<'_> {
         self.fire_use_animation(stack, animation);
     }
     /// `Player.canEat` for the food `stack`, from `Consumable.canConsume`
-    /// when eating starts: `can_eat` arrives with vanilla's (creative,
-    /// `can_always_eat`, or hungry). Clear it to refuse the food, set it to
-    /// let a full player eat. Both sides (the client starts eating as the
+    /// when eating starts: `vanilla_can_eat` is vanilla's answer (creative,
+    /// `can_always_eat`, or hungry). Answer `Some(false)` to refuse the food,
+    /// `Some(true)` to let a full player eat; `can_eat` left `None` keeps
+    /// `vanilla_can_eat`. Both sides (the client starts eating as the
     /// server does), so answer from the stack and the player alone.
-    pub(in crate::game) fn native_can_eat(&self, stack: &ItemStack, can_eat: &mut bool) {
-        self.fire_can_eat(stack, can_eat);
+    pub(in crate::game) fn native_can_eat(
+        &self,
+        stack: &ItemStack,
+        vanilla_can_eat: bool,
+        can_eat: &mut Option<bool>,
+    ) {
+        self.fire_can_eat(stack, vanilla_can_eat, can_eat);
     }
     /// NeoForge's `LivingEntityUseItemEvent.Start`: `entity` starts using
     /// `stack` in `hand` (`LivingEntity.startUsingItem`), for `duration`
@@ -4404,18 +4416,23 @@ impl Game<'_> {
     ) {
         self.fire_hurt_enemy(stack, entity, kind);
     }
-    /// A server tick of the stack a player carries in `slot`: where
+    /// A server tick of `stack`, the stack a player carries in `slot`: where
     /// `Inventory.tick` calls `Item.inventoryTick`, for every stack, each tick,
     /// `/tick freeze` included (it stops the world, not the player). `slot` is
     /// as `Inventory` saves it (0 to 35; the armour 100 feet to 103 head; -106
     /// the off hand), and `selected` says it is the held slot.
     /// `ItemPlace::PlayerSlot { player, slot }` reads and changes the stack,
     /// which stays in its slot: an emptied one empties the slot, and the
-    /// player's client gets the change. This runs often, so check the item
-    /// first. Server-side, for every living player of the world (the helpers
-    /// read the acting one).
-    pub(in crate::game) fn native_inventory_tick(&mut self, slot: i32, selected: bool) {
-        self.fire_inventory_tick(slot, selected);
+    /// player's client gets the change. Only the `ItemPart`s attached to
+    /// `stack`'s item hear it. Server-side, for every living player of the world
+    /// (the helpers read the acting one).
+    pub(in crate::game) fn native_inventory_tick(
+        &mut self,
+        stack: &ItemStack,
+        slot: i32,
+        selected: bool,
+    ) {
+        self.fire_inventory_tick(stack, slot, selected);
     }
     /// A player's equipment slot `slot` (`head`, `chest`, `legs`, `feet`,
     /// `offhand`, and `mainhand` on a swap of the hands or `/item`) took a different
@@ -4734,7 +4751,8 @@ impl Game<'_> {
     /// do (`ServerLevel.tick` broadcasts chunks before it ticks block
     /// entities). Call it when what clients show changed (a machine started),
     /// not for every tick's progress: a menu's data slots carry that. Nothing
-    /// happens for an unloaded block.
+    /// happens for an unloaded block. It also sends the one-shot fields of
+    /// `ModBlockEntityView::set_client_update_fields`.
     pub(in crate::game) fn block_entity_sync(&mut self, pos: [i32; 3]) {
         if !self.world.loaded(pos[0], pos[2]) {
             return;

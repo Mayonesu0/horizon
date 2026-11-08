@@ -285,6 +285,7 @@ fn lifecycle_fixture_walks_other_owners() {
             game.others.clear();
             for &(id, at) in entries {
                 game.others.push(crate::game::commands::OtherEntity {
+                    knot_check: None,
                     join: Default::default(),
                     id,
                     kind: "minecraft:marker".into(),
@@ -303,11 +304,90 @@ fn lifecycle_fixture_walks_other_owners() {
     .run();
 }
 
+/// Run each fixture's complete setup and actual action in both dimensions.
+pub(in crate::game) fn in_both_dimensions(mut test: impl FnMut(&mut Game<'_>, &PassBalance)) {
+    for dimension in [crate::game::Dim::Overworld, crate::game::Dim::Nether] {
+        // with_game isolates the initial SaveDir; newly opened dimensions use
+        // world_root instead. Keep that root alive until the Game is dropped.
+        let root = ScratchDirectory(std::env::temp_dir().join(format!(
+            "horizon-caller-balance-{}-{:?}-{dimension:?}",
+            std::process::id(),
+            std::thread::current().id()
+        )));
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            game.world_root = root.0.clone();
+            game.enter_level(dimension).unwrap();
+            use horizon_client::join_seq::residency::{Kind, Owner};
+            let balance = PassBalance::bind(
+                &mut game.mobs,
+                Owner {
+                    dimension: game.dim.key(),
+                    kind: Kind::Mob,
+                },
+                |mob| (mob.id, mob.join),
+            );
+            test(game, &balance);
+            balance.assert_parked(game);
+            assert_eq!(
+                game.dim, dimension,
+                "fixture changed the selected dimension"
+            );
+        });
+    }
+}
+
+pub(in crate::game) struct PassBalance {
+    journal: horizon_client::join_seq::residency::Journal,
+    owner: horizon_client::join_seq::residency::Owner,
+}
+impl PassBalance {
+    fn bind<T: horizon_client::join_seq::Joined, const DIRECT: bool>(
+        list: &mut JoinList<T, DIRECT>,
+        owner: horizon_client::join_seq::residency::Owner,
+        identity: fn(&T) -> (u32, horizon_client::join_seq::JoinSeq),
+    ) -> Self {
+        let journal = horizon_client::join_seq::residency::Journal::default();
+        list.bind_residency(&journal, owner, identity);
+        Self { journal, owner }
+    }
+    pub(in crate::game) fn drain_balanced(&self) -> usize {
+        use horizon_client::join_seq::residency::Change;
+        let mut events = Vec::new();
+        self.journal.drain_into(&mut events);
+        let mut depth = 0usize;
+        let mut lifts = 0;
+        for event in events {
+            assert_eq!(event.owner, self.owner);
+            match event.change {
+                Change::Lifted => {
+                    depth += 1;
+                    lifts += 1;
+                }
+                Change::Restored => depth = depth.checked_sub(1).expect("restore without lift"),
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0, "actual caller abandoned a lifted pass");
+        lifts
+    }
+    fn assert_parked(&self, game: &mut Game<'_>) {
+        let home = game.dim;
+        let away = match home {
+            crate::game::Dim::Overworld => crate::game::Dim::Nether,
+            _ => crate::game::Dim::Overworld,
+        };
+        game.enter_level(away).unwrap();
+        self.drain_balanced();
+        game.enter_level(home).unwrap();
+    }
+}
+
 /// Inject a nested spawn into an actual lifted mob operation, then exercise the
 /// next real entity pass with just that new owner so the caller's other state
 /// remains available for its own assertions.
 pub(in crate::game) fn assert_mob_spawn_survives(
     game: &mut Game<'_>,
+    balance: &PassBalance,
     action: impl FnOnce(&mut Game<'_>),
 ) {
     const SPAWNED: u32 = 1_900_000_000;
@@ -322,7 +402,13 @@ pub(in crate::game) fn assert_mob_spawn_survives(
         mob.no_ai = true;
         game.mobs.push(mob);
     }
+    balance.drain_balanced();
+    let mut expected: Vec<_> = game.mobs.iter().map(|mob| (mob.id, mob.join)).collect();
     with_spawn(spawn, || action(game));
+    assert!(
+        balance.drain_balanced() > 0,
+        "actual caller did not emit its lift"
+    );
     let index = game
         .mobs
         .iter()
@@ -330,6 +416,15 @@ pub(in crate::game) fn assert_mob_spawn_survives(
         .expect("nested spawn was dropped");
     assert_eq!(game.mobs[index].age, 0, "spawn ticked in the current pass");
     let join = game.mobs[index].join;
+    expected.push((SPAWNED, join));
+    assert_eq!(
+        game.mobs
+            .iter()
+            .map(|mob| (mob.id, mob.join))
+            .collect::<Vec<_>>(),
+        expected,
+        "caller changed survivor identity or spawn admission order"
+    );
     let mut original = game.mobs.lift();
     let spawned = original.extract(join).unwrap();
     game.mobs.push(spawned);
@@ -348,6 +443,7 @@ pub(in crate::game) fn assert_mob_spawn_survives(
         original,
         horizon_client::join_seq::RestoreOrder::SurvivorsFirst,
     );
+    balance.assert_parked(game);
 }
 
 /// Check a real player/guest projectile pickup pass and the next server flight pass.

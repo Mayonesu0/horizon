@@ -4,7 +4,7 @@ use super::Game;
 
 /// A player an orb may follow: the feet, the point the orb homes on and the
 /// player's UUID (None for a host with no saved UUID).
-pub(super) type OrbCandidate = ([f64; 3], [f64; 3], Option<u128>);
+pub(super) type OrbCandidate = ([f64; 3], [f64; 3], Option<u128>, u32);
 
 /// `ExperienceOrb.followNearbyPlayer`'s scan distance.
 const SCAN_DISTANCE: f64 = 8.0;
@@ -15,14 +15,21 @@ impl Game<'_> {
     /// another player or none.
     pub(super) fn orb_target(&mut self, i: usize, followed: &[OrbCandidate]) -> Option<[f64; 3]> {
         let o = &self.orbs[i];
-        let (id, at) = (o.id, o.position);
+        let (id, at, join) = (o.id, o.position, o.join);
         let distance = |feet: &[f64; 3]| -> f64 {
             (feet[0] - at.x).powi(2) + (feet[1] - at.y).powi(2) + (feet[2] - at.z).powi(2)
         };
-        let nearest = followed
-            .iter()
-            .filter(|c| distance(&c.0) < SCAN_DISTANCE * SCAN_DISTANCE)
-            .min_by(|a, b| distance(&a.0).total_cmp(&distance(&b.0)));
+        let kept = o
+            .following
+            .and_then(|id| followed.iter().find(|c| c.3 == id))
+            .filter(|c| distance(&c.0) <= SCAN_DISTANCE * SCAN_DISTANCE);
+        let nearest = kept.or_else(|| {
+            followed
+                .iter()
+                .filter(|c| distance(&c.0) < SCAN_DISTANCE * SCAN_DISTANCE)
+                .min_by(|a, b| distance(&a.0).total_cmp(&distance(&b.0)))
+        });
+        self.orbs[i].following = nearest.map(|c| c.3);
         if !self.native_authoritative()
             || !mod_api::__private::listened(mod_api::HookId::XpOrbTargeting)
         {
@@ -35,13 +42,15 @@ impl Game<'_> {
         let found = nearest.and_then(|c| c.2).and_then(|uuid| self.player(uuid));
         let mut following = found;
         self.native_xp_orb_targeting(orb, SCAN_DISTANCE, &mut following);
+        let i = self.orbs.locate(join)?;
         if following == found {
             return nearest.map(|c| c.1);
         }
         // Vanilla keeps the answer only for a living player who isn't a
         // spectator: the candidates are exactly those.
-        let uuid = following?.uuid();
-        followed.iter().find(|c| c.2 == Some(uuid)).map(|c| c.1)
+        let chosen = following.and_then(|p| followed.iter().find(|c| c.2 == Some(p.uuid())));
+        self.orbs[i].following = chosen.map(|c| c.3);
+        chosen.map(|c| c.1)
     }
 }
 
@@ -90,6 +99,7 @@ mod tests {
             count: 1,
             ticks: 0,
             health: 5,
+            following: None,
         }
     }
 

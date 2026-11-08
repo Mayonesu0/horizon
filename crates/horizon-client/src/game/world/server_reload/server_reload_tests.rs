@@ -229,15 +229,17 @@ fn reload_command_uses_applied_listener_state_and_preserves_tables_on_refusal() 
 }
 
 fn request(root: &Path) -> WorldRequest {
-    WorldRequest {
-        rule_registry: std::sync::Arc::new(horizon_client::gamerules::RuleRegistry::vanilla()),
-        save_root: root.to_owned(),
-        folder: "test".into(),
-        name: Some("test".into()),
-        seed: Some(1),
-        creative: true,
-        create: None,
-    }
+    let mut request = WorldRequest::new(
+        "test",
+        Some("test"),
+        Some(1),
+        true,
+        None,
+        std::sync::Arc::new(horizon_client::gamerules::RuleRegistry::vanilla()),
+    )
+    .unwrap();
+    request.save_root = root.to_owned();
+    request
 }
 
 #[test]
@@ -880,5 +882,83 @@ fn server_completion_reads_published_data_without_world_access_on_first_open() {
                 ]
             );
         })
+    });
+}
+
+/// `DataMapsUpdatedEvent`: once for each registry with a type on a world's
+/// first open and after every `/reload`, with the reloaded values readable.
+#[test]
+#[ignore = "needs prepared resources"]
+fn data_maps_updated_fires_for_each_registry_on_first_open_and_every_reload() {
+    use mod_api::{
+        DataMapTypesEvent, DataMapsUpdateCause, DataMapsUpdatedEvent, DataPackFilesEvent, HostSide,
+        NativeDataMapType, ServerHost,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    struct Probe {
+        loads: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<(String, DataMapsUpdateCause)>>>,
+    }
+    #[mod_api::__subscriptions]
+    impl Hooks for Probe {
+        fn data_map_types(&self, _: &mut dyn ServerHost, event: &mut DataMapTypesEvent<'_>) {
+            for (id, registry) in [
+                ("probe:fuel", "minecraft:item"),
+                ("probe:hardness", "minecraft:block"),
+            ] {
+                event.types.push(NativeDataMapType {
+                    id: id.into(),
+                    registry: registry.into(),
+                });
+            }
+        }
+        fn data_pack_files(&self, _: &mut dyn ServerHost, event: &mut DataPackFilesEvent<'_>) {
+            // Each load contributes a value one higher than the last.
+            let burn = self.loads.fetch_add(1, Ordering::SeqCst) + 1;
+            event.files.push((
+                "data_maps/probe:item/fuel".into(),
+                format!(r#"{{"values":{{"minecraft:coal":{burn}}}}}"#).into_bytes(),
+            ));
+        }
+        fn data_maps_updated(&self, host: HostSide<'_>, event: &mut DataMapsUpdatedEvent<'_>) {
+            assert!(matches!(host, HostSide::Server(_)), "the server's reload");
+            self.seen
+                .lock()
+                .unwrap()
+                .push((event.registry.to_owned(), event.cause));
+        }
+    }
+    let loads = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let probe = Probe {
+        loads: loads.clone(),
+        seen: seen.clone(),
+    };
+    mod_api::testing::with_mods(vec![ModEntry::new("probe", Box::new(probe))].into(), || {
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            let root =
+                std::env::temp_dir().join(format!("data-maps-updated-{}", std::process::id()));
+            game.load_world(request(&root)).unwrap();
+            let reloaded = |game: &crate::game::Game<'_>| {
+                game.native_data_map("minecraft:item", "probe:fuel", "minecraft:coal")
+                    .cloned()
+            };
+            let both = |count: usize| -> Vec<(String, DataMapsUpdateCause)> {
+                ["minecraft:item", "minecraft:block"]
+                    .into_iter()
+                    .cycle()
+                    .take(count)
+                    .map(|registry| (registry.to_owned(), DataMapsUpdateCause::ServerReload))
+                    .collect()
+            };
+            assert_eq!(*seen.lock().unwrap(), both(2));
+            assert_eq!(reloaded(game), Some(serde_json::json!(1)));
+            assert!(game.run_command("reload"));
+            assert_eq!(*seen.lock().unwrap(), both(4));
+            assert_eq!(reloaded(game), Some(serde_json::json!(2)));
+            let _ = std::fs::remove_dir_all(root);
+        });
     });
 }

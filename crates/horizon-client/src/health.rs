@@ -1814,7 +1814,7 @@ mod tests {
                 container.should_cause_side_effects()
             );
             assert_eq!(super::DamageContainer::from(values), *container);
-            SEEN.lock().unwrap().push(*container);
+            SEEN.lock().unwrap().push(container.clone());
         }
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.local/horizon-client")
@@ -1990,7 +1990,8 @@ mod tests {
     static SEEN: std::sync::Mutex<Vec<(i32, String, f32)>> = std::sync::Mutex::new(Vec::new());
     /// Sets the native damage hook of these tests (global: it stays set for
     /// the process): for entities 9001 to 9004 and 9011 to 9013 it records the
-    /// hit, cancels x1's, doubles x2's, makes 9003's -5 and 9004's NaN.
+    /// hit, cancels x1's, doubles x2's, makes 9003's -5 and 9004's NaN, and gives 9005's hit an
+    /// armor and an absorption reduction modifier.
     fn set_hook() -> (super::DamageHooks, fn(i32) -> Vec<(String, f32)>) {
         use super::{DamageContainer, DamageLevel, Hurting, Victim};
         fn hook(
@@ -2005,7 +2006,7 @@ mod tests {
                 }
                 Hurting::Mob(mob, source) => (mob.id as i32, format!("{:?}", source.kind)),
             };
-            if !matches!(entity, 9001..=9004 | 9011..=9013) {
+            if !matches!(entity, 9001..=9005 | 9011..=9013) {
                 return false;
             }
             let amount = container.new_damage();
@@ -2014,6 +2015,13 @@ mod tests {
                 9002 | 9012 => container.set_new_damage(amount * 2.0),
                 9003 => container.set_new_damage(-5.0),
                 9004 => container.set_new_damage(f32::NAN),
+                9005 => {
+                    use horizon_world::living_damage::{Reduction, ReductionChange};
+                    container.add_reduction_modifier(Reduction::Armor, ReductionChange::Add(1.0));
+                    container.add_reduction_modifier(Reduction::Armor, ReductionChange::Scale(2.0));
+                    container
+                        .add_reduction_modifier(Reduction::Absorption, ReductionChange::Scale(0.5));
+                }
                 _ => {}
             }
             entity % 10 == 1
@@ -2066,6 +2074,18 @@ mod tests {
         let (mut negative, mut nan) = (mob(9003), mob(9004));
         assert!(negative.damage(level, 2.0, hit) && nan.damage(level, 2.0, hit));
         assert!(negative.health == 10.0 && nan.health <= 0.0);
+        // 8 damage on a mob with 1.5 absorption hearts. Armor took none: +1 then x2 is 2, so 6
+        // goes on. The hearts would take their 1.5; half of it is 0.75, so 5.25 reaches the
+        // health (10 - 5.25) and 0.75 hearts are left.
+        let mut modified = mob(9005);
+        modified.absorption = 1.5;
+        assert!(modified.damage(level, 8.0, hit));
+        assert_eq!((modified.health, modified.absorption), (4.75, 0.75));
+        // The same hit with no modifier: 8 less the 1.5 hearts.
+        let mut plain = mob(9006);
+        plain.absorption = 1.5;
+        assert!(plain.damage(level, 8.0, hit));
+        assert_eq!((plain.health, plain.absorption), (3.5, 0.0));
     }
 
     /// Needs the prepared data in `.local/horizon-client/26.3`; skipped

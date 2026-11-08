@@ -13,12 +13,8 @@ struct Frame {
     bindings: wgpu::BindGroupLayout,
 }
 
-fn software_frame(
-    atlas_size: [u32; 2],
-    atlas: &[u8],
-    view_proj: Mat4,
-    sky: f32,
-) -> std::result::Result<Frame, String> {
+/// The software Vulkan adapter (lavapipe, llvmpipe) the pixel tests draw on.
+fn software_adapter() -> std::result::Result<wgpu::Adapter, String> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(desc);
@@ -30,6 +26,16 @@ fn software_frame(
     if adapter.get_info().device_type != wgpu::DeviceType::Cpu {
         return Err("no software Vulkan adapter".into());
     }
+    Ok(adapter)
+}
+
+fn software_frame(
+    atlas_size: [u32; 2],
+    atlas: &[u8],
+    view_proj: Mat4,
+    sky: f32,
+) -> std::result::Result<Frame, String> {
+    let adapter = software_adapter()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))
         .map_err(|error| format!("software Vulkan device request failed: {error}"))?;
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -592,6 +598,7 @@ fn scrgb_center(instanced: bool, light: u32) -> std::result::Result<f32, String>
         &frame.queue,
         wgpu::TextureFormat::Rgba8Unorm,
         super::hdr::Output::ScRgb,
+        false,
     );
     hdr.paper_white = 203.0;
     hdr.peak = 1000.0;
@@ -730,6 +737,267 @@ mod instance_run {
         let plain = render(false, false).expect("color-only software Vulkan draw");
         let alpha = |pixels: &[u8]| pixels.iter().skip(3).step_by(4).copied().collect::<Vec<_>>();
         assert_eq!(alpha(&per_copy), alpha(&plain), "a bias-0 mark must not change alpha");
+    }
+}
+
+/// What our probe pack's `gbuffers_entities`, `gbuffers_block` and `gbuffers_textured` each write
+/// ([`render_pack`]), in that order.
+pub const PACK_COLOURS: [[u8; 4]; 3] = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
+
+/// `vertices`, in the runs `spans` gives them (as the game marks them), drawn on software Vulkan
+/// by a probe pack of our own: each of its gbuffers programs writes one flat colour of
+/// [`PACK_COLOURS`] and puts a vertex at half its camera-relative x and y. Runs the pack leaves
+/// to Horizon stay black.
+pub fn render_pack(
+    vertices: &[Vertex],
+    spans: &[pack_draw::EntitySpan],
+) -> std::result::Result<Vec<[u8; 4]>, String> {
+    use std::io::Write;
+    let colour = |[r, g, b, _]: [u8; 4]| format!("vec4({r}.0, {g}.0, {b}.0, 255.0) / 255.0");
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut add = |name: &str, source: &str| -> std::io::Result<()> {
+        zip.start_file(
+            format!("shaders/{name}"),
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(source.as_bytes())
+    };
+    let programs = ["gbuffers_entities", "gbuffers_block", "gbuffers_textured"];
+    for (program, rgba) in programs.into_iter().zip(PACK_COLOURS) {
+        add(
+            &format!("{program}.vsh"),
+            "#version 120\nvoid main() { gl_Position = vec4(gl_Vertex.xy * 0.5, 0.5, 1.0); }\n",
+        )
+        .and_then(|()| {
+            add(
+                &format!("{program}.fsh"),
+                &format!(
+                    "#version 120\nvoid main() {{ gl_FragData[0] = {}; }}\n",
+                    colour(rgba)
+                ),
+            )
+        })
+        .map_err(|error| error.to_string())?;
+    }
+    add(
+        "final.vsh",
+        "#version 120\nvarying vec2 uv;\n\
+         void main() { uv = gl_MultiTexCoord0.xy; gl_Position = ftransform(); }\n",
+    )
+    .and_then(|()| {
+        add(
+            "final.fsh",
+            "#version 120\nuniform sampler2D colortex0;\nvarying vec2 uv;\n\
+             void main() { gl_FragColor = texture2D(colortex0, uv); }\n",
+        )
+    })
+    .map_err(|error| error.to_string())?;
+    let bytes = zip.finish().map_err(|error| error.to_string())?;
+    let pack = horizon_shaders::Pack::from_zip_bytes("original-owner-probe", bytes.into_inner())
+        .map_err(|error| format!("{error:?}"))?;
+    let mut macros = horizon_shaders::Macros::standard();
+    let (properties, _) = horizon_shaders::read_properties(&pack, &mut macros);
+    let inputs = horizon_shaders::GameInputs {
+        entities: Some(pack_entities::inputs()),
+        entity_geometry: Some(pack_entities::geometry_inputs()),
+        ..Default::default()
+    };
+    let post = horizon_shaders::load_post(&pack, "", &properties, &macros, &inputs);
+    let adapter = software_adapter()?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .map_err(|error| error.to_string())?;
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let texture = |size: u32, format| {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("Original owner probe"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+    };
+    let mut post = pack_post::PackPost::new(
+        &device,
+        &queue,
+        &adapter,
+        post,
+        format,
+        pack_post::World {
+            atlas: None,
+            material_maps: None,
+            lightmap: texture(1, format),
+            terrain: None,
+            block_ids: &[],
+            sprite_rects: &[],
+            celestial: None,
+            gui_size: [SIZE; 2],
+            clouds: None,
+            weather: false,
+            hand: false,
+        },
+        &Default::default(),
+    )
+    .map_err(|refused| refused.reason)?;
+    let mut rest = Vec::new();
+    post.prepare_entities(
+        &device,
+        &queue,
+        vertices,
+        spans,
+        [0.0; 4],
+        [0.0; 4],
+        &mut rest,
+        None,
+        (&[], &[]),
+    );
+    let (world, depth, screen) = (
+        texture(SIZE, format),
+        texture(SIZE, wgpu::TextureFormat::Depth32Float),
+        texture(SIZE, format),
+    );
+    let hud = HudBatch::scratch([SIZE; 2]);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    post.run(
+        &device,
+        &queue,
+        &mut encoder,
+        &world,
+        &depth,
+        &screen,
+        &probe_frame(&hud),
+        &Default::default(),
+        [SIZE; 2],
+        [SIZE; 2],
+        &[],
+        &mut |_, _, _, _| {},
+    );
+    let (color, read) = (screen.texture(), SIZE * 4);
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(read * SIZE),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        color.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(read),
+                rows_per_image: None,
+            },
+        },
+        color.size(),
+    );
+    queue.submit([encoder.finish()]);
+    readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|error| error.to_string())?;
+    let mapped = readback
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|error| error.to_string())?;
+    Ok(mapped.as_chunks::<4>().0.to_vec())
+}
+
+/// A world frame with nothing in it but the pack's entities (`render_pack`).
+fn probe_frame(hud: &HudBatch) -> super::Frame<'_> {
+    super::Frame {
+        eye: glam::DVec3::ZERO,
+        eye_rotation: [0.0; 2],
+        first_person: true,
+        shadow_scene_revision: (0, 0),
+        shadow_cache: false,
+        water_plane: None,
+        weather: &[],
+        weather_time: crate::weather::Time::new(0, 0.0),
+        camera: glam::DVec3::new(0.5, 100.0, 0.5),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_degrees: 90.0,
+        bob: Mat4::IDENTITY,
+        spin: Mat4::IDENTITY,
+        sky: crate::environment::Sky::default(),
+        distance: 12.0,
+        detail_distance: 12.0,
+        depth_far: 1000.0,
+        underwater: false,
+        cave_culling: false,
+        title: false,
+        sky_blocked: false,
+        skybox: false,
+        end_sky: false,
+        end_sky_sprite: None,
+        boss_world_fog: false,
+        environment_fog: None,
+        water_fog: [0.0; 3],
+        fog: None,
+        dark_disc: false,
+        outline: Vec::new(),
+        outline_after_terrain: false,
+        outline_high_contrast: false,
+        pvp: Default::default(),
+        debug_lines: &[],
+        debug_lines_on_top: &[],
+        debug_crosshair: &[],
+        hud,
+        glint_alpha: 0.75,
+        glint_ticks: 0.0,
+        nether_lighting: false,
+        entities: &[],
+        static_block_entities: &[],
+        visible_static_block_entity_sections: &[],
+        static_block_entity_stats: crate::block_entity_render::StaticCacheFrameStats::default(),
+        entity_motion: &[],
+        entity_motion_posed: &[],
+        colored_lights: &[],
+        emissive_layers: &[],
+        shadow_only: &[],
+        entity_spans: &[],
+        skin: None,
+        glowing: &[],
+        dynamic_lights: &[],
+        clouds: None,
+        lightning: Default::default(),
+        additive: &[],
+        see_through: &[],
+        world_primitives: Default::default(),
+        celestial: &[],
+        stars: None,
+        hand: &[],
+        hand_items: &[],
+        hand_fov_degrees: 70.0,
+        screen: &[],
+        pack: Default::default(),
+        border: None,
+        game_time: 0.0,
+        shader_game_time: 0.0,
+        end_portal_sprites: [[0.0; 4]; 2],
+        crumbling_sprite: [0.0; 4],
+        ticks: 0,
+        darkness: (0.0, 0.0),
+        night_vision: 0.0,
+        block_flicker: 0.0,
+        boss_darken: 0.0,
+        menu_blur: None,
+        chunk_fade: 0.0,
+        post_effects: crate::post_chain::Request::none(),
     }
 }
 

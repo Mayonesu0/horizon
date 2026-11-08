@@ -24,19 +24,22 @@ pub trait LivingBackend {
     /// namespaced as the registry has it, the ticks left (-1 infinite), the
     /// amplifier and the flags. The effect is a registration-slot key resolved at load.
     /// None when it has the effect not, before effect resolution, or for an armor
-    /// stand, the dragon, a stale handle or a client.
+    /// stand, the dragon or a stale handle; on a client, for any entity but the
+    /// local player, whose copy of what the server sent it is read.
     #[access(WorldOnly)]
     fn living_effect(&self, living: LivingRef, effect: EffectKey) -> Option<NativeActiveEffect>;
     /// Side: both.
     /// The entity's active effects (`LivingEntity.getActiveEffects`), in the
     /// order their store keeps them, in `Some` even when it has none. None
-    /// for an armor stand, the dragon, a stale handle or a client.
+    /// for an armor stand, the dragon or a stale handle; on a client, for any
+    /// entity but the local player (its copy of what the server sent it).
     #[access(WorldOnly)]
     fn living_effects(&self, living: LivingRef) -> Option<Vec<NativeActiveEffect>>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity has `effect` (`LivingEntity.hasEffect`), using its resolved key.
-    /// False before effect resolution, for an armor stand, the dragon,
-    /// a stale handle or a client.
+    /// False before effect resolution, for an armor stand, the dragon or a stale handle;
+    /// on a client, for any entity but the local player, whose copy of what the server
+    /// sent it is read.
     #[access(WorldOnly)]
     fn living_potion_affected(&self, living: LivingRef, effect: EffectKey) -> bool;
     /// Side: both.
@@ -218,6 +221,52 @@ pub trait LivingBackend {
     /// a stale or unavailable handle.
     #[access(WorldOnly)]
     fn living_dimensions_for_pose(&self, living: LivingRef, pose: Pose) -> Option<[f64; 3]>;
+    /// Side: server.
+    /// `Entity.canUsePortal`: the engine's one gate for a player,
+    /// `player_can_use_portal` (`Entity.canUsePortal(false)`: alive, nobody's
+    /// passenger — and not asleep, vanilla `LivingEntity.canUsePortal`'s
+    /// `isSleeping` half; a parity fix: the client's portal entry used to
+    /// skip it), a guest's the same rule over their body and vehicle, a
+    /// mob's walk gate (`mob_can_use_portal`, #1275's read: not a boss that
+    /// never travels, not a creaking bound to its heart, riding nothing,
+    /// carrying no one this side holds back). None for a stale handle, an
+    /// armor stand or the dragon: the portal walk carries neither as its
+    /// own traveller. #943.
+    #[access(WorldOnly)]
+    fn living_can_use_portal(&self, living: LivingRef) -> Option<bool>;
+    /// Side: server.
+    /// `Mob.isWithinMeleeAttackRange`: the melee goal's own reach check —
+    /// the mob's box inflated by sqrt(2.04) − 0.6 over the target's box, or
+    /// an active item's attack range for a mob (a spear's reach) — whether
+    /// this living entity's next melee strike reaches `target`. The check is
+    /// a mob's; a player's attack reach is another rule (the interaction
+    /// range attribute), so a player answers None. #943.
+    #[access(WorldOnly)]
+    fn living_in_melee_range(&self, living: LivingRef, target: EntityRef) -> Option<bool>;
+    /// Side: server.
+    /// `LivingEntity.canFreeze`: the decision the freeze tick itself runs —
+    /// a mob's (`ai::can_freeze`: not `#freeze_immune_entity_types`, no
+    /// `#freeze_immune_wearables` worn), a player's
+    /// (`PlayerMotion::can_freeze`: not a spectator, no immune armor).
+    /// None for a stale handle, an armor stand or the dragon. #943.
+    #[access(WorldOnly)]
+    fn living_can_freeze(&self, living: LivingRef) -> Option<bool>;
+    /// Side: server.
+    /// `LivingEntity.canBreatheUnderwater`: the air tick's gate, the
+    /// species' own `breathes_water` (a squid's true, a dolphin's false). A
+    /// player drowns: false, their air ticks down. None for a stale handle,
+    /// an armor stand or the dragon. #943.
+    #[access(WorldOnly)]
+    fn living_can_breathe_underwater(&self, living: LivingRef) -> Option<bool>;
+    /// Side: server.
+    /// The bed a sleeper lies in, as its block faces
+    /// (`LivingEntity.getBedOrientation` over `BedBlock.getBedOrientation`):
+    /// the block at the sleeping position, its `facing` where that block is
+    /// one of `#minecraft:beds` — one path for every sleeper. None where
+    /// the sleeper keeps no position, the block is not a bed, or the handle
+    /// is stale. #943.
+    #[access(WorldOnly)]
+    fn living_bed_orientation(&self, living: LivingRef) -> Option<Direction>;
 }
 /// The handles' client reads of the `living` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

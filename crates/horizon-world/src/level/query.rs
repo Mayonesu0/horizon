@@ -76,7 +76,7 @@ impl Behaviours {
         self.data(state).implements(interface)
     }
     pub(crate) fn fluid_in(&self, kind: FluidKind, mask: u8) -> bool {
-        mask & (1 << kind as u8) != 0
+        mask & kind.mask() != 0
     }
     pub(crate) fn is_water_fluid(&self, kind: FluidKind) -> bool {
         self.fluid_in(kind, self.fluid_tags.water)
@@ -215,6 +215,11 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     pub fn can_support_rigid_block(&self, pos: BlockPos) -> bool {
         self.signals().can_support_rigid_block(pos)
     }
+    /// Rigid support from the neighbour state supplied by a shape update,
+    /// using the live block entity at `pos` through the shared signal queries.
+    pub(super) fn can_support_rigid_block_on(&self, pos: BlockPos, state: BlockStateId) -> bool {
+        self.signals().can_support_rigid_block_on(pos, state)
+    }
     /// `Block.canSupportCenter(level, pos, direction)`.
     pub fn can_support_center(&self, pos: BlockPos, direction: Direction) -> bool {
         self.signals().can_support_center(pos, direction)
@@ -268,7 +273,11 @@ impl<L: super::signal_access::SignalAccess + ?Sized> Signals<'_, L> {
     /// exported facts see no block entity and call every face unsupported,
     /// which made a lever on the piston's back pop off when it retracted.
     pub(super) fn support_state(&self, pos: BlockPos) -> BlockStateId {
-        let state = self.state(pos);
+        self.support_state_for(pos, self.state(pos))
+    }
+    /// [`Self::support_state`] for `state`, which a shape update hands over as
+    /// the neighbour's state, read with the block entity at `pos`.
+    fn support_state_for(&self, pos: BlockPos, state: BlockStateId) -> BlockStateId {
         if self.b.is_block(state, self.b.named.moving_piston)
             && let Some(piston) = self.moving_piston(pos)
         {
@@ -307,8 +316,8 @@ impl<L: super::signal_access::SignalAccess + ?Sized> Signals<'_, L> {
     /// progress 1, before the block entity finishes, it sits in the cell: a rail
     /// carried by slime finishes on top of a slime block still moving below it
     /// (#8111). None for other cells, and for moved blocks without a fixed shape.
-    fn moving_block_shape(&self, pos: BlockPos) -> Option<VoxelShape> {
-        if !self.b.is_block(self.state(pos), self.b.named.moving_piston) {
+    fn moving_block_shape(&self, pos: BlockPos, state: BlockStateId) -> Option<VoxelShape> {
+        if !self.b.is_block(state, self.b.named.moving_piston) {
             return None;
         }
         let piston = self.moving_piston(pos)?;
@@ -324,10 +333,11 @@ impl<L: super::signal_access::SignalAccess + ?Sized> Signals<'_, L> {
     fn moving_block_supports(
         &self,
         pos: BlockPos,
+        state: BlockStateId,
         direction: Direction,
         support: SupportType,
     ) -> Option<bool> {
-        let shape = self.moving_block_shape(pos)?;
+        let shape = self.moving_block_shape(pos, state)?;
         Some(support.is_supporting(&shape, direction).unwrap_or(false))
     }
     /// `ShulkerBoxBlock.getBlockSupportShape` at `pos`: vanilla asks the block
@@ -337,10 +347,10 @@ impl<L: super::signal_access::SignalAccess + ?Sized> Signals<'_, L> {
     fn shulker_support(
         &self,
         pos: BlockPos,
+        state: BlockStateId,
         direction: Direction,
         support: SupportType,
     ) -> Option<bool> {
-        let state = self.state(pos);
         if !self
             .b
             .tags
@@ -357,24 +367,33 @@ impl<L: super::signal_access::SignalAccess + ?Sized> Signals<'_, L> {
             .ok()
     }
     pub fn sturdy(&self, pos: BlockPos, direction: Direction) -> bool {
-        if let Some(sturdy) = self.moving_block_supports(pos, direction, SupportType::Full) {
+        let state = self.state(pos);
+        if let Some(sturdy) = self.moving_block_supports(pos, state, direction, SupportType::Full) {
             return sturdy;
         }
-        if let Some(sturdy) = self.shulker_support(pos, direction, SupportType::Full) {
+        if let Some(sturdy) = self.shulker_support(pos, state, direction, SupportType::Full) {
             return sturdy;
         }
         self.b.is_face_sturdy(self.support_state(pos), direction)
     }
     /// `Block.canSupportRigidBlock(level, below)`.
     pub fn can_support_rigid_block(&self, pos: BlockPos) -> bool {
-        if let Some(rigid) = self.moving_block_supports(pos, Direction::Up, SupportType::Rigid) {
+        self.can_support_rigid_block_on(pos, self.state(pos))
+    }
+    /// `state.isFaceSturdy(level, pos, UP, RIGID)`: `state` with the live block
+    /// entity at `pos`, as `DiodeBlock.canSurviveOn` asks of a shape update's
+    /// neighbour. A retracting piston's base is a `moving_piston` here.
+    pub(super) fn can_support_rigid_block_on(&self, pos: BlockPos, state: BlockStateId) -> bool {
+        if let Some(rigid) =
+            self.moving_block_supports(pos, state, Direction::Up, SupportType::Rigid)
+        {
             return rigid;
         }
-        if let Some(rigid) = self.shulker_support(pos, Direction::Up, SupportType::Rigid) {
+        if let Some(rigid) = self.shulker_support(pos, state, Direction::Up, SupportType::Rigid) {
             return rigid;
         }
         self.b
-            .is_face_sturdy_rigid(self.support_state(pos), Direction::Up)
+            .is_face_sturdy_rigid(self.support_state_for(pos, state), Direction::Up)
     }
     /// `Block.canSupportCenter(level, pos, direction)`.
     pub fn can_support_center(&self, pos: BlockPos, direction: Direction) -> bool {
@@ -383,10 +402,11 @@ impl<L: super::signal_access::SignalAccess + ?Sized> Signals<'_, L> {
         {
             return false;
         }
-        if let Some(center) = self.moving_block_supports(pos, direction, SupportType::Center) {
+        let raw = self.state(pos);
+        if let Some(center) = self.moving_block_supports(pos, raw, direction, SupportType::Center) {
             return center;
         }
-        if let Some(center) = self.shulker_support(pos, direction, SupportType::Center) {
+        if let Some(center) = self.shulker_support(pos, raw, direction, SupportType::Center) {
             return center;
         }
         self.b.is_face_sturdy_center(state, direction)

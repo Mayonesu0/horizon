@@ -200,6 +200,14 @@ pub trait ItemsBackend {
     /// chested mount is not one): none for any other entity, and on a client.
     #[access(WorldOnly)]
     fn entity_automation_size(&self, entity: u32) -> Option<usize>;
+    /// Side: server.
+    /// How many equipment slots living entity `entity`'s [`ENTITY_ITEMS`](crate::ENTITY_ITEMS)
+    /// answers (#932, NeoForge's `LivingEntityEquipmentWrapper`): a mob's or an armor stand's
+    /// seven (main hand, off hand, feet, legs, chest, head and body, by `EquipmentSlot`'s
+    /// ordinal; the saddle is not automation's to move), none for any other entity, and on a
+    /// client.
+    #[access(WorldOnly)]
+    fn entity_equipment_size(&self, entity: u32) -> Option<usize>;
 }
 /// The handles' writes of the `items` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

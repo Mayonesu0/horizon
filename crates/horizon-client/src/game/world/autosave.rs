@@ -19,9 +19,10 @@ impl Game<'_> {
         autosave_interval(rate)
     }
 
-    /// `MinecraftServer.onTickRateChanged`: a rate that asks for a shorter
-    /// wait than the one already running shortens it.
+    /// `MinecraftServer.onTickRateChanged`: mods hear of it, then a rate that
+    /// asks for a shorter wait than the one already running shortens it.
     pub(super) fn on_tick_rate_changed(&mut self) {
+        self.native_server_tick_rate_changed();
         let interval = self.next_autosave_interval();
         if interval < self.ticks_until_autosave {
             self.ticks_until_autosave = interval;

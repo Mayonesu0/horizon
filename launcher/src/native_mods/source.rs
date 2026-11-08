@@ -350,7 +350,6 @@ fn private_source_stage_exports_and_registers_priorities() {
     let bundle = Bundle {
         manifest,
         dir: root.clone(),
-        injections: vec![],
     };
     let catalog_dir = root.join("catalog");
     stage(&root, &catalog_dir, std::slice::from_ref(&bundle)).unwrap();
@@ -431,14 +430,13 @@ fn private_calls_use_ctx_shared_ids_and_real_registration_priorities() {
     let bundle = Bundle {
         manifest,
         dir: root.clone(),
-        injections: vec![],
     };
     stage(&root, &dir, std::slice::from_ref(&bundle)).unwrap();
     let catalog = Catalog::read(&dir).unwrap();
     assert_eq!(catalog.sites.len(), 1);
     assert!(catalog.sites[0].private);
     assert_eq!(catalog.sites[0].ctx, discovered.ctx);
-    assert_ne!(catalog.sites[0].hash, discovered.ctx);
+    assert_ne!(discovered.hash, discovered.ctx);
     assert!(super::slots::routes(&catalog, &bundle.manifest)
         .unwrap()
         .iter()

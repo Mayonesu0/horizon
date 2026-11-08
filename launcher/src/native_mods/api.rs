@@ -46,12 +46,12 @@ pub(super) fn main_rs(
         m.id, m.version, m.side,
     )).collect::<String>();
     let raw = mods.iter().enumerate().flat_map(|(i, manifest)| {
-        super::inject::raw_of(listed, manifest).into_iter().map(move |injection| {
+        super::slots::points(listed, manifest).map(move |injection| {
             let point = listed.iter().find(|point| internals::plain_path(&point.target) == internals::plain_path(&injection.target)).expect("raw target checked");
             let place = point.place(injection.at_return);
-            let order = manifest.inject.iter().find(|entry| entry.id == injection.id)
-                .map(|entry| format!(".ordered({}, {:?})", entry.priority, entry.id))
-                .unwrap_or_default();
+            let entry = manifest.inject.iter().find(|entry| entry.id == injection.id)
+                .expect("unified point entry");
+            let order = format!(".ordered({}, {:?})", entry.priority, entry.id);
             format!("        mod_{i}_internals::raw::{place}({:?}, mod_{i}::{}){order}, // injection {:?}\n", manifest.id, injection.method, injection.id)
         })
     }).collect::<String>();
@@ -86,17 +86,6 @@ pub(super) fn main_rs(
             })
             .collect::<String>();
     let raw = raw
-        + &mods
-            .iter()
-            .enumerate()
-            .flat_map(|(index, manifest)| {
-                super::sites::of(manifest).map(move |injection| {
-                    super::sites::find(sites, injection)
-                        .expect("site checked")
-                        .registration(index, manifest, injection)
-                })
-            })
-            .collect::<String>()
         + &mods
             .iter()
             .enumerate()

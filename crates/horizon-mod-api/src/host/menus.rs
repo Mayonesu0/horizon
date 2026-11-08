@@ -75,6 +75,21 @@ pub trait MenusBackend {
     #[access(WorldOnly)]
     fn menu_slot_gives(&self, menu: MenuRef, slot: usize) -> Option<bool>;
 }
+/// The handles' client reads of the `menus` area, implemented by the game and reached through [`ClientBackend`].
+// hidden: a handle's backend, reached through `ClientBackend`; mods call the handle, never this trait
+#[doc(hidden)]
+#[horizon_mod_api_macros::host_area]
+pub trait MenusClientBackend {
+    /// Side: client.
+    /// The open inventory screen's slot boxes in menu slot order
+    /// (`AbstractContainerScreen.leftPos`/`topPos` plus each `Slot.x`/`Slot.y`, 16x16). A box
+    /// is `[x, y, width, height]` in GUI pixels, with `None` for a hidden slot.
+    /// Returns `None` for a stale menu, another screen, or an inventory covered
+    /// by the recipe book. The boxes follow the actual layout, including GUI
+    /// scale and the recipe book's horizontal offset.
+    #[access(WorldOnly)]
+    fn menu_slot_boxes(&self, menu: MenuRef) -> Option<Vec<Option<[f32; 4]>>>;
+}
 /// The handles' client writes of the `menus` area, implemented by the game and reached through [`ClientBackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
 #[doc(hidden)]

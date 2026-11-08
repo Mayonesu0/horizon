@@ -81,7 +81,7 @@ fn dev_pack() -> Option<&'static str> {
         .as_deref()
 }
 
-fn picked_pack(settings: &horizon_client::settings::Settings) -> &str {
+pub(super) fn picked_pack(settings: &horizon_client::settings::Settings) -> &str {
     active_pack(
         dev_pack().unwrap_or(&settings.horizon.shader_pack),
         &settings.mods,
@@ -168,6 +168,7 @@ pub(super) fn picks_material_pack(settings: &horizon_client::settings::Settings)
 
 /// The ids a pack gives entities and block entities (4.1, 5.3), for the spans of the entity
 /// geometry.
+#[cfg_attr(test, derive(Default))]
 pub(super) struct PackIds {
     entities: HashMap<String, i32>,
     blocks: BlockIds,
@@ -667,6 +668,15 @@ impl Game<'_> {
             if let Some(gpu) = self.skin_frame.borrow_mut().spans.last_mut() {
                 gpu.emissive = emission > 0;
             }
+        }
+    }
+
+    /// Starts a span for mod model copies (`WorldDrawContext::draw_model_instances`) under a
+    /// pack: block entities, as `BlockEntityDrawContext::model` draws the same model, with the
+    /// id of a block the pack doesn't list, since no block owns them. Nothing without a pack.
+    pub(super) fn mark_model_copies(&self, start: usize) {
+        if let Some(ids) = &self.pack_ids {
+            self.push_span(start, "BLOCK_ENTITIES", ids.missing_block);
         }
     }
 

@@ -10,8 +10,9 @@
 //! answering more than it was asked is a mod bug, named once, and the write aborts.
 use super::HostTransaction;
 use super::{
-    Capability, Direction, ENTITY_ITEMS, Hand, ITEMS, ItemResource, ItemStack, LevelRef, MenuRef,
-    MenuSlotBacking, ResourceHandler, ServerHost, Transaction, backend_mut_of, backend_of,
+    Capability, Direction, ENTITY_ITEMS, EquipmentSlot, Hand, ITEMS, ItemResource, ItemStack,
+    LevelRef, MenuRef, MenuSlotBacking, ResourceHandler, ServerHost, Transaction, backend_mut_of,
+    backend_of,
 };
 use std::{collections::HashSet, fmt::Debug, marker::PhantomData, sync::Mutex};
 
@@ -66,6 +67,17 @@ pub enum ItemPlace {
         entity: u32,
         /// The slot's index in the entity's inventory.
         slot: usize,
+    },
+    /// Slot `slot` of living entity `entity`'s equipment (NeoForge's
+    /// `LivingEntityEquipmentWrapper` through `Capabilities.Item.ENTITY`), reached through
+    /// [`ENTITY_ITEMS`](super::ENTITY_ITEMS). Its write is the equipment write
+    /// `LivingRef::set_equipment` makes, so the equip and unequip game event, sound and
+    /// attribute updates are the same, and a transaction that aborts puts it back.
+    Equipment {
+        /// The entity's network id.
+        entity: u32,
+        /// The equipment slot.
+        slot: EquipmentSlot,
     },
     /// Slot `slot` of the item at `parent`, through its [`ITEM_ITEMS`] handler: a backpack in a
     /// backpack.

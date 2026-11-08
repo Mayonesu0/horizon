@@ -364,6 +364,30 @@ fn server_inventory_operations_take_a_server_host(
     )
 }
 
+/// Compile-only: a server mod schedules and cancels a delayed task through the `&mut dyn ServerHost`
+/// its hooks get.
+#[allow(dead_code)]
+fn delayed_tasks_take_a_server_host(
+    host: &mut dyn ServerHost,
+) -> (Result<TaskId, ScheduleError>, bool) {
+    (host.schedule_task(20, 7), host.cancel_task(TaskId(1)))
+}
+
+/// Compile-only: a client mod reads column heights of the world its window shows.
+#[allow(dead_code)]
+fn client_heights_take_a_client_host(host: &dyn ClientHost) -> Result<Vec<Option<i32>>, String> {
+    host.client_surface_heights(&[(0, 0), (16, -16)], NativeHeightmap::MotionBlocking)
+}
+
+/// Compile-only: a client mod reads the open inventory screen's slot boxes through its menu handle.
+#[allow(dead_code)]
+fn menu_slot_boxes_take_a_client_host(
+    host: &dyn ClientHost,
+    menu: MenuRef,
+) -> Option<Vec<Option<[f32; 4]>>> {
+    menu.slot_boxes(host)
+}
+
 /// Compile-only: the world data, tick, sky and sight queries as a mod calls them, the reads on any
 /// host and the writes (which move the level's random or its saved data) on a server host.
 #[allow(dead_code)]

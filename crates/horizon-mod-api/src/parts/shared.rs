@@ -80,6 +80,7 @@ pub struct Parts {
     pub(crate) block_entity_kinds: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     pub(crate) items: HashMap<Box<str>, Vec<Attached<dyn ItemPart>>>,
     pub(crate) menus: HashMap<Box<str>, Vec<Attached<dyn MenuPart>>>,
+    pub(crate) fluids: HashMap<Box<str>, Vec<Attached<dyn FluidPart>>>,
     /// Entity parts by entity type id (`minecraft:zombie`), for the goal
     /// registration at every `Mob` construction (#1077). They carry no scoped
     /// hook, so they never enter `hooks`.
@@ -111,6 +112,7 @@ pub struct HookParts {
     pub(crate) block_entity_kinds: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     pub(crate) items: HashMap<Box<str>, Vec<Attached<dyn ItemPart>>>,
     pub(crate) menus: HashMap<Box<str>, Vec<Attached<dyn MenuPart>>>,
+    pub(crate) fluids: HashMap<Box<str>, Vec<Attached<dyn FluidPart>>>,
 }
 
 /// Which things a capability's providers are registered by.
@@ -141,6 +143,8 @@ pub(crate) struct Installed {
     pub(crate) tags: TagParts,
     pub(crate) block_entity_types: Vec<BlockEntityTypeDecl>,
     pub(crate) entity_attributes: Vec<EntityAttributeDeclaration>,
+    pub(crate) world_fluids: Vec<horizon_mod_package::content::FluidLook>,
+    pub(crate) entity_attribute_modifications: Vec<EntityAttributeModification>,
     pub(crate) registry_keys: horizon_mod_runtime::registry_keys::Requests,
     pub(crate) effects: OnceLock<horizon_mod_runtime::registry_keys::Effects>,
     pub(crate) resolved_block_entity_types: OnceLock<horizon_mod_runtime::registry_keys::Names>,
@@ -481,6 +485,7 @@ impl Parts {
         index!(block_entity_kinds, block_entity_subscribed);
         index!(items, item_subscribed);
         index!(menus, menu_subscribed);
+        index!(fluids, fluid_subscribed);
     }
 }
 
@@ -522,6 +527,8 @@ pub struct PartRegistrar {
     pub(crate) tags: TagParts,
     pub(crate) block_entity_types: Vec<BlockEntityTypeDecl>,
     pub(crate) entity_attributes: Vec<EntityAttributeDeclaration>,
+    pub(crate) world_fluids: Vec<horizon_mod_package::content::FluidLook>,
+    pub(crate) entity_attribute_modifications: Vec<EntityAttributeModification>,
     pub(crate) registry_keys: Rc<RefCell<horizon_mod_runtime::registry_keys::Requests>>,
     pub(crate) effects: OnceLock<horizon_mod_runtime::registry_keys::Effects>,
     pub(crate) controllers: Vec<ControllerInfo>,
@@ -543,6 +550,8 @@ impl PartRegistrar {
             tags: TagParts::default(),
             block_entity_types: Vec::new(),
             entity_attributes: Vec::new(),
+            world_fluids: Vec::new(),
+            entity_attribute_modifications: Vec::new(),
             registry_keys: Default::default(),
             effects: OnceLock::new(),
             controllers: Vec::new(),
@@ -674,6 +683,8 @@ pub(crate) fn install_registrar(
         tags: registrar.tags,
         block_entity_types: registrar.block_entity_types,
         entity_attributes: registrar.entity_attributes,
+        world_fluids: registrar.world_fluids,
+        entity_attribute_modifications: registrar.entity_attribute_modifications,
         resolved_block_entity_types: OnceLock::new(),
         registry_keys: Rc::try_unwrap(registrar.registry_keys)
             .unwrap_or_else(|_| unreachable!("registration scope has ended"))

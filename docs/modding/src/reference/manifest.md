@@ -106,9 +106,10 @@ wasm entries, even when declared. Loading them refuses with `native only: <path>
 suggesting an opt-in file. The daily prebuilt always generates a table from the checkout's
 per-mod declarations. A launcher build from source generates one only when an enabled wasm
 package in the instance declares internals, and uses only those installed mods' paths, not
-the checkout's seed files. With no such mod it retains the empty table. Standalone server
-exports currently have no instance declarations and keep the empty table; use an instance
-build with the mod installed or the daily prebuilt when the mod needs internals.
+the checkout's seed files. With no such mod it retains the empty table. A standalone server
+export takes declarations from `.hmod` packages placed directly in its explicit input folder,
+without reading an instance. Install and enable the same packages in the server's game folder
+to use that table ([Standalone server export](../how-to/native-mods/035-standalone-server-export.md)).
 
 Top-level `[dependencies]` declares other mods by id: a semver requirement string, or
 `{ version = "^1", optional = true }`. These versions refer to `horizon-mod.toml`, not Cargo metadata.

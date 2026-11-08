@@ -401,6 +401,7 @@ pub fn sky_darken(environment: &Environment, day_time: i64, rain: f32, thunder: 
     let mut sky = environment.sample(day_time, None, None);
     apply_weather(&mut sky, rain, thunder);
     // Level.updateSkyBrightness uses a truncating Java float-to-int conversion.
+    // `sky_light_level` is already in raw light levels, not a fraction of 15.
     (15.0 - sky.sky_light_level) as i32
 }
 

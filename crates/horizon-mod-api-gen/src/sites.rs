@@ -24,9 +24,9 @@ pub(crate) enum Cause {
 
 /// The declaration that failed and its machine-distinguishable cause.
 #[derive(Debug)]
-pub(crate) struct Error {
+pub struct Error {
     pub origin: Option<String>,
-    pub cause: Cause,
+    pub(crate) cause: Cause,
 }
 impl Error {
     pub fn at(mut self, origin: impl Into<String>) -> Self {
@@ -89,14 +89,14 @@ pub(crate) const DIRECTORY: &str = "crates/horizon-mod-api-gen/slots";
 
 /// The union of per-mod slot lists, with declaration locations for diagnostics.
 #[derive(Default, Debug)]
-pub(crate) struct Slots {
+pub struct Slots {
     pub functions: BTreeMap<String, String>,
     pub calls: Vec<Declaration>,
     pub types: BTreeMap<String, String>,
 }
 
 /// Read function, call and type slots with one parser. An absent directory has no listed slots.
-pub(crate) fn slots(directory: &Path) -> Result<Slots, Error> {
+pub fn slots(directory: &Path) -> Result<Slots, Error> {
     let contents = match fs::read_dir(directory) {
         Ok(files) => files,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Slots::default()),
@@ -107,13 +107,32 @@ pub(crate) fn slots(directory: &Path) -> Result<Slots, Error> {
         .collect::<Result<Vec<PathBuf>, _>>()?;
     files.sort();
     let mut slots = Slots::default();
-    let mut union: BTreeMap<_, Declaration> = BTreeMap::new();
     for file in files
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "txt"))
     {
         let text =
             fs::read_to_string(&file).map_err(|e| Error::from(e).at(file.display().to_string()))?;
+        slots.extend(&file, &text)?;
+    }
+    Ok(slots)
+}
+
+impl Slots {
+    /// Parse another list with the same syntax and conflict checks as on-disk slot lists.
+    /// `file` is a diagnostic location, not read or written. Discard this value on error.
+    pub fn extend(&mut self, file: &Path, text: &str) -> Result<(), Error> {
+        let mut union: BTreeMap<_, Declaration> = self
+            .calls
+            .iter()
+            .cloned()
+            .map(|call| {
+                (
+                    (call.target.clone(), call.selector.clone(), call.ordinal),
+                    call,
+                )
+            })
+            .collect();
         for (i, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or_default().trim();
             if line.is_empty() {
@@ -128,9 +147,9 @@ pub(crate) fn slots(directory: &Path) -> Result<Slots, Error> {
                 let target = plain_path(target);
                 if parts.len() == 1 {
                     let entries = if type_path.is_some() {
-                        &mut slots.types
+                        &mut self.types
                     } else {
-                        &mut slots.functions
+                        &mut self.functions
                     };
                     entries.entry(target).or_insert(origin.clone());
                     return Ok(None);
@@ -187,9 +206,47 @@ pub(crate) fn slots(directory: &Path) -> Result<Slots, Error> {
                 }
             }
         }
+        self.calls = union.into_values().collect();
+        Ok(())
     }
-    slots.calls = union.into_values().collect();
-    Ok(slots)
+}
+
+#[cfg(test)]
+#[test]
+fn slot_extension_matches_disk_parser() {
+    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/slot-extension-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let a = directory.join("a.txt");
+    let b = directory.join("b.txt");
+    let first =
+        "# comment\nlower::run\ntype lower::Thing<'_>\ngame::tick | lower::call | 2 | context\n";
+    let second = "lower::run\ngame::tick | lower::call | 2 | context\nother::run\n";
+    fs::write(&a, first).unwrap();
+    fs::write(&b, second).unwrap();
+    let from_disk = slots(&directory).unwrap();
+    let mut extended = Slots::default();
+    extended.extend(&a, first).unwrap();
+    extended.extend(&b, second).unwrap();
+    assert_eq!(extended.functions, from_disk.functions);
+    assert_eq!(extended.types, from_disk.types);
+    assert_eq!(extended.calls, from_disk.calls);
+    assert_eq!(
+        extended.functions.keys().collect::<Vec<_>>(),
+        ["lower::run", "other::run"]
+    );
+    assert!(extended.types.contains_key("lower::Thing"));
+    assert_eq!(extended.calls[0].ordinal, Some(2));
+    assert_eq!(extended.calls[0].ctx, "context");
+    let conflict = "game::tick | lower::call | 2 | changed\n";
+    fs::write(&b, conflict).unwrap();
+    let disk_error = slots(&directory).unwrap_err().to_string();
+    let memory_error = extended.extend(&b, conflict).unwrap_err().to_string();
+    assert_eq!(disk_error, memory_error);
+    assert!(memory_error.contains("a.txt:4") && memory_error.contains("b.txt:1"));
+    fs::remove_dir_all(directory).unwrap();
 }
 
 /// A compiled call site's raw form, written to `points.json` beside the head/return points.

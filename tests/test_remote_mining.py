@@ -27,7 +27,7 @@ class RemoteMiningTests(unittest.TestCase):
 struct Hit { pos: [i32; 3], face: u8 }
 /// The held stack: `ItemStack.item`, which the debug-stick check reads.
 struct Stack { item: &'static str }
-struct Mining { pos: [i32; 3], progress: f32, ticks: u32 }
+struct Mining { pos: [i32; 3], progress: f32, per_tick: f32, ticks: u32 }
 #[derive(Default)]
 struct Remote { destroy_delay: u32, destroying: Option<([i32; 3], u8, f32)>, destroying_item: String, is_destroying: bool }
 struct Ground { on_ground: bool }
@@ -93,7 +93,7 @@ impl Game {
     fn pick(&self) -> Option<Hit> { Some(self.hit) }
     fn held(&self) -> Option<&Stack> { None }
     // Player.blockActionRestricted: adventure without a can_break item.
-    fn remote_break_restricted(&self) -> bool { self.restricted }
+    fn remote_break_restricted(&self, _: [i32; 3]) -> bool { self.restricted }
     fn veto_mining_prediction(&self, _: [i32; 3], _: u8, _: bool, _: f32) -> bool {
         self.veto
     }

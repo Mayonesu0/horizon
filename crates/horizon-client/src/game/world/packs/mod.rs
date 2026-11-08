@@ -345,6 +345,7 @@ impl Game<'_> {
         // registering mod for crash attribution.
         let client_listeners = self.register_client_reload_listeners();
         let runtime_sprites = super::client_reload::collect_runtime_sprites();
+        super::mods::register_fluid_models(self.options.execution_role);
         self.pack_reload = Some(PackReload::spawn(kind, move |progress| {
             stage_pack(
                 &vanilla,
@@ -802,6 +803,91 @@ pub(super) fn reload_files(
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn fluid_models_reload_recollects_before_baking() {
+        use mod_api::testing::with_mods;
+        use mod_api::{FluidModel, Hooks, ModEntry, RegisterFluidModelsEvent, RegistrationContext};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        #[derive(Default)]
+        struct Models(Arc<AtomicUsize>);
+        #[mod_api::horizon_mod]
+        impl Hooks for Models {
+            fn register_fluid_models(
+                &self,
+                _: &RegistrationContext,
+                event: &mut RegisterFluidModelsEvent<'_>,
+            ) {
+                let mut model = FluidModel::default();
+                model.fluid = "reload_boundary:oil".into();
+                model.still = Some(format!(
+                    "reload_boundary:block/oil_{}",
+                    self.0.load(Ordering::SeqCst)
+                ));
+                event.models.push(model);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("horizon-fluid-reload-{}", std::process::id()));
+        let fluids = dir.join("data/reload_boundary/horizon/fluid");
+        std::fs::create_dir_all(&fluids).unwrap();
+        std::fs::write(dir.join("horizon-mod.toml"),
+                "id = \"reload_boundary\"\nname = \"Reload boundary\"\nversion = \"1\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\n").unwrap();
+        std::fs::write(fluids.join("oil.json"), br#"{"world":{}}"#).unwrap();
+        let vanilla = PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let mut sources = super::super::mods::ModsState {
+            dev: vec![dir.clone()],
+            ..Default::default()
+        };
+        let enabled = ["reload_boundary".to_owned()].into();
+        sources.select(&std::env::current_dir().unwrap(), &enabled);
+        let root = super::super::mods::content_root(&vanilla, &sources).unwrap();
+        super::super::native_entity_refs::tests::with_game_at(
+            root.prepared().to_path_buf(),
+            |game| {
+                game.options.execution_role = super::super::execution_role::ExecutionRole::Client;
+                game.ui.vanilla_root = vanilla;
+                game.mods = sources;
+                game.settings.mods.enabled = enabled;
+                let generation = Arc::new(AtomicUsize::new(0));
+                // Drive the real entry point and join its CPU staging worker, without
+                // applying the staged textures (which would need a window/GPU).
+                let mut reload = |expected: Option<&str>| {
+                    game.spawn_pack_reload(ReloadKind::Selection).unwrap();
+                    let mut pending = game.pack_reload.take().unwrap();
+                    let staged = pending.handle.take().unwrap().join().unwrap().unwrap();
+                    let layers = &staged.pack.render.sprite_layers;
+                    for id in ["reload_boundary:block/oil_0", "reload_boundary:block/oil_1"] {
+                        assert_eq!(layers.contains_key(id), expected == Some(id), "{id}");
+                    }
+                };
+                with_mods(
+                    vec![ModEntry::new(
+                        "reload_boundary",
+                        Box::new(Models(generation.clone())),
+                    )]
+                    .into(),
+                    || {
+                        mod_api::__private::with_test_packages(&["reload_boundary"], || {
+                            reload(Some("reload_boundary:block/oil_0"));
+                            generation.store(1, Ordering::SeqCst);
+                            reload(Some("reload_boundary:block/oil_1"));
+                        });
+                    },
+                );
+                // Removing the provider must replace the stored registration with
+                // an empty vector, not leave the last model in the baked atlas.
+                with_mods(Vec::new().into(), || reload(None));
+                horizon_client::fluid_models::register(vec![]);
+                horizon_client::fluid_models::set_world_looks([]);
+                std::fs::remove_dir_all(dir).unwrap();
+            },
+        );
+    }
 
     fn wait(reload: &mut PackReload) -> (ReloadKind, StageResult) {
         for _ in 0..500 {

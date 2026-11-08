@@ -736,6 +736,10 @@ pub(super) fn decoration_pose_at(x: i8, y: i8, rot: u8, z: f32) -> glam::Mat4 {
         * glam::Mat4::from_translation(glam::Vec3::new(-0.125, 0.125, 0.0))
 }
 pub(super) fn shown_on_frame(sprite: &str) -> bool {
+    // A mod's type says for itself (`showOnItemFrame`).
+    if let Some(shown) = horizon_client::map_decoration_types::registered().shown_on_frame(sprite) {
+        return shown;
+    }
     !matches!(
         decoration_type(sprite),
         Some("player" | "red_marker" | "blue_marker" | "player_off_map" | "player_off_limits")
@@ -758,20 +762,30 @@ fn tracks_count(sprite: &str) -> bool {
     })
 }
 /// The sprite of a decoration type that a `minecraft:map_decorations`
-/// entry or a server's packet names.
+/// entry or a server's packet names: vanilla's, or one a mod registered
+/// (`map_decoration_types`).
 fn decoration_sprite(id: &str) -> Option<&'static str> {
     let name = id.strip_prefix("minecraft:").unwrap_or(id);
     DECORATION_TYPES
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, sprite)| *sprite)
+        .or_else(|| horizon_client::map_decoration_types::registered().sprite(id))
 }
-/// The type a decoration's sprite stands for, as its registry names it.
+/// The type a decoration's sprite stands for, as its registry names it (a mod's with its
+/// namespace).
 fn decoration_type(sprite: &str) -> Option<&'static str> {
     DECORATION_TYPES
         .iter()
         .find(|(_, s)| *s == sprite)
         .map(|(name, _)| *name)
+        .or_else(|| horizon_client::map_decoration_types::registered().id_of(sprite))
+}
+impl Game<'_> {
+    /// Whether `sprite` draws one of vanilla's decoration types: a mod's type may not take it.
+    pub(in crate::game) fn is_vanilla_decoration_sprite(sprite: &str) -> bool {
+        DECORATION_TYPES.iter().any(|(_, s)| *s == sprite)
+    }
 }
 /// A named `minecraft:map_decorations` entry: key, sprite, x, z, rotation.
 type StaticDecoration = (JavaString, &'static str, f64, f64, f32);
@@ -1672,7 +1686,7 @@ impl Game<'_> {
         let slot = match self.maps.slots.show(&id) {
             Some(slot) => slot,
             None => {
-                let (slot, _) = self.maps.slots.claim(id);
+                let (slot, _) = self.maps.slots.claim(id)?;
                 if let Some(m) = self.maps.data.get_mut(&id) {
                     m.texture_dirty = true;
                 }

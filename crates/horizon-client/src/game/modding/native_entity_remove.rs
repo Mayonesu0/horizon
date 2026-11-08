@@ -225,6 +225,7 @@ mod tests {
 
         with_game(|game| {
             game.others.push(OtherEntity {
+                knot_check: None,
                 join: Default::default(),
                 item_transformation: None,
                 id: 12,
@@ -331,6 +332,7 @@ mod tests {
                 .chunks
                 .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
             game.others.push(OtherEntity {
+                knot_check: None,
                 join: Default::default(),
                 item_transformation: None,
                 id: 12,
@@ -513,6 +515,7 @@ mod tests {
 
         with_game(|game| {
             game.others.push(OtherEntity {
+                knot_check: None,
                 join: Default::default(),
                 item_transformation: None,
                 id: 12,

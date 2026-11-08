@@ -15,6 +15,10 @@ pub struct ClientServer {
     /// This window owns the connected integrated server. A loopback address
     /// alone does not make this true; a splitscreen guest does not own it.
     pub integrated_local: bool,
+    /// Folder name relative to the instance's saves directory for the owned
+    /// integrated world. Renaming the world in-game leaves this key unchanged.
+    /// External connections and splitscreen guests return `None`.
+    pub save_folder: Option<String>,
 }
 
 /// Existing local frame counters, sampled only when requested by a mod.

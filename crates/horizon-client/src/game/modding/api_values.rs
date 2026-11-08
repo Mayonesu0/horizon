@@ -272,6 +272,7 @@ impl TryIntoEngine for mod_api::NativeItemDrop {
     type Error = StackWriteError;
     fn try_into_engine(&self, items: &Items) -> Result<Self::Engine, Self::Error> {
         Ok(Self::Engine {
+            random: None,
             stack: self.stack.try_into_engine(items)?,
             position: self.position,
             velocity: self.velocity,
@@ -1411,6 +1412,9 @@ fn apply_block_entity_snapshot(
             .map_err(|_| BlockEntitySnapshotError::InvalidStack)?;
         entity.apply_snapshot(fields, snapshot.revision().changes());
     }
+    if let Some(fields) = snapshot.client_update_fields() {
+        entity.set_client_update_fields(fields.clone());
+    }
     Ok(())
 }
 
@@ -1615,6 +1619,33 @@ mod block_entity_snapshot_tests {
             Err(BlockEntitySnapshotError::InvalidRevision)
         );
         assert_eq!(entity.data, [7, 8, 9]);
+    }
+
+    #[test]
+    fn a_callbacks_client_update_fields_reach_the_queue_only_from_a_valid_snapshot() {
+        use mod_api::__private::game::ModBlockEntityViewNew;
+        let items = Items::for_tests(Default::default());
+        let mut entity =
+            crate::containers::ModBlockEntity::new("test:machine".into(), Default::default());
+        let batch =
+            horizon_core::nbt::Compound::from([("effect".into(), horizon_core::nbt::Tag::Int(23))]);
+        let made = entity.revision();
+        let mut snapshot = entity.try_into_api().unwrap();
+        let before = snapshot.revision();
+        mod_api::ModBlockEntityView::new(&mut snapshot).set_client_update_fields(batch.clone());
+        // Nothing but the queue moved, and an unchanged snapshot still delivers.
+        apply_block_entity_snapshot(&mut entity, &snapshot, before, &items).unwrap();
+        assert_eq!(entity.revision(), made);
+        assert_eq!(entity.take_client_update_fields(), Some(batch.clone()));
+        // A snapshot naming another entity is refused whole.
+        let mut other = mod_api::ModBlockEntity::new("test:machine".into(), Default::default());
+        let before = other.revision();
+        mod_api::ModBlockEntityView::new(&mut other).set_client_update_fields(batch);
+        assert_eq!(
+            apply_block_entity_snapshot(&mut entity, &other, before, &items),
+            Err(BlockEntitySnapshotError::InvalidRevision)
+        );
+        assert!(!entity.has_client_update_fields());
     }
 }
 

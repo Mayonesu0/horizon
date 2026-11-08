@@ -20,6 +20,13 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", 
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
 xxhash-rust = { version = "0.8.19", features = ["xxh32"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+cap-std = "3"
+cap-fs-ext = "3"
+
 [[bin]]
 name = "horizon-world"
 path = "src/main.rs"

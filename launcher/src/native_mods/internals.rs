@@ -51,14 +51,6 @@ pub(super) enum Error {
     Path {
         path: String,
     },
-    NotSite {
-        mod_id: String,
-        line: String,
-    },
-    SiteKind {
-        mod_id: String,
-        injection: String,
-    },
 }
 
 impl std::fmt::Display for Error {
@@ -84,14 +76,6 @@ impl std::fmt::Display for Error {
             Self::NotRaw { mod_id, target } => trf(
                 "E_NOT_RAW: {mod}: {target} has no raw form: it is generic or takes impl Trait.",
                 &[("mod", mod_id), ("target", target)],
-            ),
-            Self::NotSite { mod_id, line } => trf(
-                "E_NOT_SITE: {mod}: add `{line}` to crates/horizon-mod-api-gen/slots/{mod}.txt and rebuild the game; this call is not a compiled-in site.",
-                &[("mod", mod_id), ("line", line)],
-            ),
-            Self::SiteKind { mod_id, injection } => trf(
-                "E_SITE_KIND: {mod}: injection {injection}: WRAP_WITH_CONDITION requires a unit-returning call.",
-                &[("mod", mod_id), ("injection", injection)],
             ),
             Self::Path { path } => trf(
                 "E_INTERNAL_PATH: {path} cannot be re-exported as a declared internal; declare its types or free functions instead.",
@@ -171,10 +155,7 @@ impl Catalog {
         for declared in &manifest.internals {
             internals::check(&self.internals, &manifest.id, declared)?;
         }
-        for injection in sites::of(manifest) {
-            sites::check(&self.sites, manifest, injection)?;
-        }
-        for injection in inject::raw_of(&self.points, manifest) {
+        for injection in super::slots::points(&self.points, manifest) {
             if !self.points.iter().any(|point| {
                 plain_path(&point.target) == plain_path(&injection.target)
                     && point.raw
@@ -211,7 +192,7 @@ impl Catalog {
         for decision in super::slots::report(self, manifest) {
             super::append_log(&decision)?;
         }
-        for injection in inject::raw_of(&self.points, manifest) {
+        for injection in super::slots::points(&self.points, manifest) {
             let point = self
                 .points
                 .iter()
@@ -221,13 +202,6 @@ impl Catalog {
             super::append_log(&trf(
                 "{mod} listens raw at {point}",
                 &[("mod", &manifest.id), ("point", &place)],
-            ))?;
-        }
-        for injection in sites::of(manifest) {
-            let site = sites::find(&self.sites, injection).expect("site checked");
-            super::append_log(&trf(
-                "{mod} listens raw at {point}",
-                &[("mod", &manifest.id), ("point", &site.name)],
             ))?;
         }
         Ok(())
@@ -279,7 +253,7 @@ impl Catalog {
         text.push_str("pub mod raw {\n");
         let mut constructors = BTreeSet::new();
         let mut exports = BTreeSet::new();
-        for injection in inject::raw_of(&self.points, manifest) {
+        for injection in super::slots::points(&self.points, manifest) {
             let point = self
                 .points
                 .iter()
@@ -320,11 +294,6 @@ impl Catalog {
             constructors.insert(format!(
                 "    /// Registers a function of this place's exact listener type.\n    pub const fn {constructor}(id: &'static str, f: {name}) -> mod_points::__private::SlotListener {{\n        // SAFETY: `f` has this place's listener type, checked by the signature.\n        unsafe {{ mod_points::__private::SlotListener::new(id, mod_points::PointId::{variant}, f as *const ()) }}\n    }}\n"
             ));
-        }
-        for injection in sites::of(manifest) {
-            sites::find(&self.sites, injection)
-                .expect("site checked")
-                .facade(&mut exports, &mut constructors, &mut crates);
         }
         for (_, site) in super::slots::sites(&self.sites, manifest) {
             site.facade(&mut exports, &mut constructors, &mut crates);
@@ -445,14 +414,7 @@ impl Module {
 }
 
 pub(super) fn needed(manifest: &horizon_mod_package::Manifest) -> bool {
-    !manifest.inject.is_empty()
-        || !manifest.internals.is_empty()
-        || manifest.native.as_ref().is_some_and(|native| {
-            native
-                .injection
-                .iter()
-                .any(|injection| injection.raw.is_some())
-        })
+    !manifest.inject.is_empty() || !manifest.internals.is_empty()
 }
 
 pub(super) fn package(id: &str) -> String {
@@ -640,6 +602,57 @@ pub mod raw {
                 assert!(error.to_string().contains("E_NOT_RAW"));
             }
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unified_source_fallback_does_not_bypass_raw_abi_refusal() {
+        let (dir, bundle, catalog) = fixture("raw-abi");
+        for fault in 0..3 {
+            let mut points = catalog.points.clone();
+            match fault {
+                0 => points[0].raw = false,
+                1 => points[0].listener = None,
+                _ => points[0].return_listener = None,
+            }
+            let broken = Catalog {
+                points,
+                internals: catalog.internals.clone(),
+                ..Catalog::default()
+            };
+            // Unified routing can select Source when a compiled slot lacks a raw form.
+            // The facade must still refuse its untyped/incomplete ABI, never erase it.
+            super::super::slots::check(&broken, &bundle.manifest).unwrap();
+            let expected = Error::NotRaw {
+                mod_id: "example".into(),
+                target: "horizon_client::game::Game<'_>::tick".into(),
+            };
+            assert_eq!(broken.check(&bundle.manifest), Err(expected));
+            assert!(matches!(
+                broken.facade(&bundle.manifest),
+                Err(Error::NotRaw { .. })
+            ));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn facade_is_needed_only_for_unified_injections_or_declared_internals() {
+        let (dir, mut bundle, _) = fixture("needed");
+        assert!(needed(&bundle.manifest));
+        bundle.manifest.internals.clear();
+        assert!(needed(&bundle.manifest));
+        bundle.manifest.inject.clear();
+        assert!(!needed(&bundle.manifest));
+        bundle
+            .manifest
+            .internals
+            .push(horizon_mod_package::manifest::Internal {
+                path: "horizon_client::game::Game".into(),
+                hash: "1234".into(),
+                kind: None,
+            });
+        assert!(needed(&bundle.manifest));
         fs::remove_dir_all(dir).unwrap();
     }
 

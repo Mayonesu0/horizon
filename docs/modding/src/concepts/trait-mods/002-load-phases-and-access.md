@@ -13,15 +13,21 @@ Each owning thread progresses through `Packages → Registration → Setup → C
 | Phase | Available access |
 | --- | --- |
 | Packages | Package discovery; no game Host operations. |
-| Registration | Declarations through `RegistrationContext`; no Host. |
+| Registration | Declarations through `RegistrationContext`, with its mod-list, registry and settings reads; no Host. |
 | Setup | Client setup reads, published asset/data queries and registry/settings/mod-list reads; no world handles or transactions. |
 | Config | Settings reads and the existing mod-scoped `ConfigFiles` service; no world handles, transactions or other game operations. |
 | Reloading | Published asset/data queries, registry facts, settings and mod-list reads, listener registration, and existing `DataLoadContext` callbacks; no world handles or transactions. |
 | World | The owning game's side-typed `ServerHost` or `ClientHost`. |
 
 Registration runs once: `register`, `component_types`, `blocks`, `items` and `standalone_models`
-receive only `RegistrationContext`. Client setup runs once after the initial asset apply. The
-window's Client/Common configs load once immediately after client setup and before title,
+receive only `RegistrationContext`. Its `mods()`, `registry(name)` and `setting(mod_id, key)` read
+one view captured before the first of them runs, so every registration step sees the same values
+whatever the dispatch order: the loaded packages, the built-in registries as `registries.json`
+lists them (not what mods declare during registration) and the settings on disk at that moment. A
+mod validates the keys it declares against them from `Hooks::register`; a name that is not a
+namespaced identifier, an unknown registry, an empty or path-like setting key, a package that is
+not loaded, or a context the engine gave no data returns a `RegistrationReadError`. Client setup
+runs once after the initial asset apply. The window's Client/Common configs load once immediately after client setup and before title,
 connection, input, render or ordinary tick callbacks. This includes pack-error recovery: the failed
 selection is cleared and saved during initialization, but its options screen opens only after Config
 completes. A title-screen callback is already in World: world-handle constructors can return `None`,
@@ -51,3 +57,5 @@ There is no separate common-setup, load-complete or intermod event: registration
 reload cover common setup, client setup is `client_setup`, dedicated setup is `server_about_to_start`,
 and dependencies express intermod ordering. Load complete is the edge after initial Config and before
 `server_about_to_start`, not a hook.
+
+Settings snapshots accept only regular UTF-8 files, without following file or package-directory symlinks (including internal links). Invalid UTF-8, special files and refused entries are absent, not errors. Each file is limited to 64 KiB before trimming, each mod to 1,024 captured keys, and the whole snapshot to 16 MiB before trimming. Over-limit keys are omitted in sorted package-id and key-name order. Enumeration is limited to 4,096 names per package; packages exceeding that budget are omitted entirely rather than retaining an unstable enumeration prefix. One warning per refusal class is emitted per snapshot. These generous limits cover the small scalar setting values used by the settings API; they do not apply to mod data files.

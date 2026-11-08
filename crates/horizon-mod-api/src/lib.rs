@@ -66,15 +66,16 @@ pub enum GameRuleError {
     Duplicate,
 }
 
-/// Why an entity type's attribute declaration was refused
-/// ([`Registrar::declare_entity_attributes`](EntityAttributesRegistrar::declare_entity_attributes)).
+/// Why an entity type's attribute declaration or addition was refused
+/// ([`Registrar::declare_entity_attributes`](EntityAttributesRegistrar::declare_entity_attributes),
+/// [`Registrar::modify_entity_attributes`](EntityAttributesRegistrar::modify_entity_attributes)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EntityAttributeError {
-    /// The entity type's id is invalid, empty, or in a namespace the declaring
-    /// mod does not own.
+    /// The entity type's id is invalid or empty, or, for a declared set, in a
+    /// namespace the declaring mod does not own.
     InvalidId,
-    /// The set declares the same attribute twice.
+    /// The set names the same attribute twice.
     DuplicateAttribute,
     /// A base value is not finite.
     NotFinite,
@@ -303,6 +304,20 @@ impl<'a> ModBlockEntityView<'a> {
     /// Id.
     pub fn id(&self) -> &str {
         self.entity.id()
+    }
+    /// Replace the one-shot fields the block's next change sends clients; an empty compound
+    /// clears them. They go over what `block_entity_update_tag` gives (or alone, without
+    /// one) in the single packet every current viewer gets, and are gone. Call
+    /// `block_entity_sync` to send them: until a change reaches a viewer they wait, however
+    /// many chunks are sent, and they end with the block entity. They are for a one-shot
+    /// effect, not state: nothing saves, clones or compares them, and the revision stays.
+    /// A client merges them into its copy's `nbt` as any update field, where they stay until
+    /// sent again: a changing value, such as a counter, tells one effect from the next.
+    /// Fields that would take the packet past what a client reads (2 MiB of network NBT) are
+    /// dropped with a warning, and the change goes without them. A transaction that rolls the
+    /// block entity back also drops a batch queued before it.
+    pub fn set_client_update_fields(&mut self, fields: Compound) {
+        self.entity.client_update_fields = Some(fields);
     }
 }
 impl std::ops::Deref for ModBlockEntityView<'_> {
@@ -2931,6 +2946,17 @@ impl TagsUpdateCause {
     }
 }
 
+/// What made a `data_maps_updated` notice fire (`DataMapsUpdatedEvent.UpdateCause`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DataMapsUpdateCause {
+    /// `SERVER_RELOAD`: the server merged its data maps, on a world's first open or after
+    /// `/reload`.
+    ServerReload,
+    /// `CLIENT_SYNC`: a client applied the data maps its server sent.
+    ClientSync,
+}
+
 /// Why a mod removes an entity (`Entity.RemovalReason`): the two reasons
 /// that destroy it. The unloading and dimension-change reasons belong to the
 /// game.
@@ -3388,16 +3414,6 @@ pub struct NativePlayerExperience {
     pub total: i32,
 }
 
-/// Damage sources supported for a mod effect tick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum NativeEffectDamage {
-    /// Poison's magic damage.
-    Magic,
-    /// The Wither effect's damage.
-    Wither,
-}
-
 /// A change requested by an effect tick, applied after its hooks return.
 // hidden: a game-side type, not part of the mod surface
 #[doc(hidden)]
@@ -3405,7 +3421,7 @@ pub enum NativeEffectDamage {
 #[non_exhaustive]
 pub enum EffectTickChange {
     Heal(f32),
-    Hurt(NativeEffectDamage, f32),
+    Hurt(String, f32),
     AddExhaustion(f32),
     Eat(i32, f32),
 }
@@ -3416,10 +3432,13 @@ impl ApplyEffectTickEvent<'_> {
         self.changes.push(EffectTickChange::Heal(amount));
     }
 
-    /// Queue damage with a supported source.
-    pub fn hurt(&mut self, damage_type: NativeEffectDamage, amount: f32) {
+    /// Queue damage of a registered damage type on the holder: a vanilla
+    /// one (`minecraft:magic`, `minecraft:wither`) or a datapack's
+    /// (`demo:heat`). It reaches the holder's hurt hooks with that type; an
+    /// unregistered type hurts nothing.
+    pub fn hurt(&mut self, damage_type: &str, amount: f32) {
         self.changes
-            .push(EffectTickChange::Hurt(damage_type, amount));
+            .push(EffectTickChange::Hurt(damage_type.to_owned(), amount));
     }
 
     /// Queue food exhaustion; a non-player holder ignores it.
@@ -5359,6 +5378,46 @@ mod tests {
         assert!(!harvest);
         assert_eq!(speed, 2.0);
         assert!(!canceled);
+    }
+
+    #[test]
+    fn an_inventory_tick_reaches_only_the_parts_of_the_ticked_item() {
+        #[derive(Clone)]
+        struct Ticked(Arc<Mutex<Vec<(i32, bool)>>>);
+        #[mod_api::horizon_part]
+        impl ItemPart for Ticked {
+            fn inventory_tick(&self, _: &mut dyn ServerHost, event: &mut InventoryTickEvent<'_>) {
+                self.0.lock().unwrap().push((event.slot, event.selected));
+            }
+        }
+        struct Both(Ticked, Ticked);
+        #[mod_api::__subscriptions]
+        impl Hooks for Both {
+            fn register(&self, r: &mut dyn Registrar, _: &crate::RegistrationContext) {
+                let (stick, stone) = (r.item_key("minecraft:stick"), r.item_key("minecraft:stone"));
+                r.item_part(stick, self.0.clone());
+                r.item_part(stone, self.1.clone());
+            }
+        }
+        // Another test installs parts with tags: a dispatch must run on a game thread.
+        mark_game_thread();
+        let (sticks, stones) = (Ticked(Default::default()), Ticked(Default::default()));
+        let mods: Mods = vec![ModEntry::new(
+            "tickers",
+            Box::new(Both(sticks.clone(), stones.clone())),
+        )]
+        .into();
+        install(mods.clone());
+        install_parts(&mods, &crate::parts::tests::rule_schema()).unwrap();
+        let mut host = FakeHost::new();
+        let stone = crate::parts::tests::stack("minecraft:stone", 1, 0);
+        let diamond = crate::parts::tests::stack("minecraft:diamond", 1, 0);
+        dispatch_inventory_tick(&mut host, &stick(), 4, true);
+        dispatch_inventory_tick(&mut host, &stone, -106, false);
+        dispatch_inventory_tick(&mut host, &stick(), 100, false);
+        dispatch_inventory_tick(&mut host, &diamond, 0, false);
+        assert_eq!(*sticks.0.lock().unwrap(), [(4, true), (100, false)]);
+        assert_eq!(*stones.0.lock().unwrap(), [(-106, false)]);
     }
 
     #[test]

@@ -272,6 +272,9 @@ impl crate::prelude::ItemsBackend for FakeHost {
     fn entity_automation_size(&self, _: u32) -> Option<usize> {
         None
     }
+    fn entity_equipment_size(&self, _: u32) -> Option<usize> {
+        None
+    }
     fn item_container_slots(&self, stack: &ItemStack) -> Option<Vec<Option<ItemStack>>> {
         self.registries.container_slots(stack)
     }
