@@ -38,16 +38,23 @@ client-side list. The query also returns `None` while any lookup member is
 temporarily extracted, rather than returning an incomplete authoritative list.
 
 The walk preserves lookup admission order across storage families, including
-removal and re-admission at the end. A chunk's entities join in the order the
-chunk was stored: vanilla's `storeChunkSections` order, section by section from
-section 0 upward and then the negative sections, each section in admission
-order, whatever storage family holds each entity. A vehicle comes before its
-passengers. Three limitations remain: an entity that moved into another section
-since it joined is stored at its admission place there, where vanilla moves it
-to the end of the section it entered; entities with a zero runtime ID fall back
-to stable storage join order, not runtime admission order; and unregistered
-entity kinds have no authoritative lookup handle and are omitted from this query.
-This is not complete saved-world or whole-level ordering parity (#2703).
+removal and re-admission at the end. An entity spawned during play, such as a
+fired arrow or primed TNT, joins the lookup as it spawns, as vanilla's
+`addFreshEntity` adds it, even when the engine gives it its id later. A chunk's
+entities join in the order the chunk was stored: vanilla's `storeChunkSections`
+order, section by section from section 0 upward and then the negative sections,
+whatever storage family holds each entity. Each section keeps its entities in
+the order they entered it: an entity that crosses into another section goes to
+the end of that section, as vanilla's `onMove` puts it there, while its place in
+the lookup stays the same. A vehicle comes before its passengers.
+
+Some differences remain. Section moves are noted once per level tick, after its
+entities have moved. An entity that leaves a section and comes back within one
+tick keeps its place, and the entities that move in one tick enter their new
+sections in lookup order, where vanilla follows its exact tick order (a
+passenger moves right after its vehicle). Entities that the engine keeps outside
+the residency families, such as lingering potion clouds, lightning bolts and
+eyes of ender, are not lookup members at all.
 The call allocates buffers for the result and sorts admission keys; it does not
 allocate an object per entity. Cache the result when doing several passes in one
 hook rather than repeatedly crossing the host boundary.

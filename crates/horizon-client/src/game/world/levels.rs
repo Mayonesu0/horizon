@@ -1069,6 +1069,8 @@ impl Game<'_> {
                 },
             );
             self.drain_entity_inside();
+            // `Callback.onMove`, in the order this level's entities moved.
+            self.note_entity_sections();
             if result.is_err() {
                 break;
             }

@@ -235,14 +235,13 @@ pub trait LevelsBackend {
     /// Returns None while any lookup member is temporarily extracted, rather
     /// than returning an incomplete list.
     /// Order is lookup admission order, preserved across temporary extraction;
-    /// removal and re-admission moves an entity to the end. A chunk's entities
-    /// join in the order it stored them: section by section, each in admission
-    /// order, as vanilla stores them. An entity that moved into another section
-    /// since it joined keeps its admission place there, where vanilla moves it
-    /// to the end of that section. Zero runtime IDs fall back to stable storage
-    /// join order, not runtime admission order. Unregistered entity kinds have
-    /// no authoritative lookup handle and are omitted. These limitations mean
-    /// saved-world and whole-level ordering parity is not yet complete (#2703).
+    /// removal and re-admission moves an entity to the end. An entity spawned
+    /// during play is admitted as it spawns, even when its id comes later. A
+    /// chunk's entities join in the order it stored them: section by section,
+    /// each in the order its entities entered it, as vanilla stores them.
+    /// Section moves are noted once per level tick. Entities kept outside the
+    /// residency families (lingering potion clouds, lightning bolts, eyes of
+    /// ender) are not members.
     /// Allocates a result buffer, not one allocation per entity; sorting is
     /// O(n log n), followed by one authoritative handle lookup per candidate.
     #[access(WorldOnly)]

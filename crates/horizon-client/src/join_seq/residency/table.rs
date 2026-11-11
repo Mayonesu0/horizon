@@ -41,6 +41,11 @@ struct ResidentRow {
     location: Location,
     details: IdentityDetails,
     admission: JoinSeq,
+    /// The section it is in (`SectionPos` x, y, z), once a section pass saw it.
+    section: Option<[i32; 3]>,
+    /// When it entered that section: its admission, or the pass that saw it
+    /// move there (`Callback.onMove` adds it at the end of the new section).
+    entry: JoinSeq,
 }
 
 /// One game's index, shared by active and parked dimensions through the journal.
@@ -51,6 +56,8 @@ pub struct EntityTable {
     rows: FxHashMap<NonZeroU32, ResidentRow>,
     extracted: FxHashMap<NonZeroU32, Location>,
     lifted: FxHashMap<Owner, usize>,
+    /// The section pass's movers, reused from pass to pass.
+    moved: Vec<(JoinSeq, NonZeroU32, [i32; 3])>,
 }
 impl EntityTable {
     /// Observe this game's existing structural-event sink.
@@ -61,6 +68,7 @@ impl EntityTable {
             rows: FxHashMap::default(),
             extracted: FxHashMap::default(),
             lifted: FxHashMap::default(),
+            moved: Vec::new(),
         }
     }
     /// Check the current owner and id once, returning its already located value.
@@ -126,15 +134,26 @@ impl EntityTable {
                 source: identity.source,
             };
             match event.change {
-                Change::Install(identity) | Change::PutBack(identity) => {
+                Change::Install(identity)
+                | Change::Spawned(identity)
+                | Change::PutBack(identity) => {
                     let location = location(identity);
+                    let old = self.rows.get(&identity.id).copied();
+                    // A new member joins the lookup now, or, given its id
+                    // after it spawned, when it joined its storage.
+                    let admission = old.map_or_else(
+                        || match event.change {
+                            Change::Spawned(_) => identity.join,
+                            _ => JoinSeq::next(),
+                        },
+                        |row| row.admission,
+                    );
                     let row = ResidentRow {
                         location,
                         details: identity.details,
-                        admission: self
-                            .rows
-                            .get(&identity.id)
-                            .map_or_else(JoinSeq::next, |row| row.admission),
+                        admission,
+                        section: old.and_then(|row| row.section),
+                        entry: old.map_or(admission, |row| row.entry),
                     };
                     if let Some(old) = self.rows.insert(identity.id, row) {
                         debug_assert_eq!(old.location, location, "duplicate loaded entity id");
@@ -234,11 +253,32 @@ impl EntityTable {
         rows.into_iter().map(|(_, id)| id).collect()
     }
 
-    /// Each admitted id's lookup admission: what an `EntitySection` keeps its
-    /// entities in, so a chunk saved in this order loads back in it.
-    pub fn admission_order(&mut self) -> impl Fn(u32) -> Option<JoinSeq> + '_ {
+    /// `Callback.onMove` for one level's members: `visit` notes each with its
+    /// current section. A member whose section changed since the last pass is
+    /// now at the end of its new section. Movers of one pass enter in lookup
+    /// order, as vanilla ticks them. The first section seen is where it joined.
+    pub fn note_sections(&mut self, visit: impl FnOnce(&mut SectionPass<'_>)) {
         self.drain();
-        |id| Some(self.rows.get(&NonZeroU32::new(id)?)?.admission)
+        visit(&mut SectionPass {
+            rows: &mut self.rows,
+            moved: &mut self.moved,
+        });
+        self.moved
+            .sort_unstable_by_key(|(admission, ..)| *admission);
+        for (_, id, section) in self.moved.drain(..) {
+            if let Some(row) = self.rows.get_mut(&id) {
+                row.section = Some(section);
+                row.entry = JoinSeq::next();
+            }
+        }
+    }
+
+    /// Each admitted id's place in its section (`EntitySection` keeps its
+    /// entities in the order they entered it), so a chunk saved section by
+    /// section in this order loads back in it.
+    pub fn section_entry_order(&mut self) -> impl Fn(u32) -> Option<JoinSeq> + '_ {
+        self.drain();
+        |id| Some(self.rows.get(&NonZeroU32::new(id)?)?.entry)
     }
 
     /// Clone the current producer authority when binding storage.
@@ -252,6 +292,28 @@ impl EntityTable {
         self.rows.clear();
         self.extracted.clear();
         self.lifted.clear();
+        self.moved.clear();
+    }
+}
+/// One section pass over a level's members (`EntityTable::note_sections`).
+pub struct SectionPass<'a> {
+    rows: &'a mut FxHashMap<NonZeroU32, ResidentRow>,
+    moved: &'a mut Vec<(JoinSeq, NonZeroU32, [i32; 3])>,
+}
+impl SectionPass<'_> {
+    /// Note that `id` is in `section` (`SectionPos` x, y, z) now.
+    pub fn note(&mut self, id: u32, section: [i32; 3]) {
+        let Some(row) = NonZeroU32::new(id).and_then(|id| self.rows.get_mut(&id)) else {
+            return;
+        };
+        match row.section {
+            None => row.section = Some(section),
+            Some(old) if old != section => {
+                self.moved
+                    .push((row.admission, NonZeroU32::new(id).unwrap(), section))
+            }
+            Some(_) => {}
+        }
     }
 }
 fn forget_row(map: &mut FxHashMap<NonZeroU32, ResidentRow>, id: NonZeroU32, location: Location) {
@@ -271,6 +333,9 @@ mod completion_tests;
 #[cfg(test)]
 #[path = "table/metadata_tests.rs"]
 mod metadata_tests;
+#[cfg(test)]
+#[path = "table/section_tests.rs"]
+mod section_tests;
 
 #[cfg(test)]
 mod tests {
