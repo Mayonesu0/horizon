@@ -451,12 +451,12 @@ impl Game<'_> {
             }),
         })
     }
-    /// Biome facts at a position for finalizeSpawn and variant rules.
+    /// Biome facts at `level.getBiome(pos)` (zoomed) for finalizeSpawn and variants.
     pub(super) fn biome_facts(&self, x: i32, y: i32, z: i32) -> BiomeFacts {
-        let Some(chunk) = self.world.chunks.get(&(x >> 4, z >> 4)) else {
+        let Some(id) = self.zoomed_biome_id([x, y, z]) else {
             return BiomeFacts::default();
         };
-        let b = world_biomes!(self).get(chunk.biome(x, y, z));
+        let b = world_biomes!(self).get(id);
         let tags = self.res.mob_data();
         let has = |t: &str| tags.biome_has(t, &b.name);
         let climate = if has("minecraft:spawns_warm_variant_farm_animals") {
