@@ -41,10 +41,9 @@ struct ResidentRow {
     location: Location,
     details: IdentityDetails,
     admission: JoinSeq,
-    /// The section it is in (`SectionPos` x, y, z), once a section pass saw it.
-    section: Option<[i32; 3]>,
-    /// When it entered that section: its admission, or the pass that saw it
-    /// move there (`Callback.onMove` adds it at the end of the new section).
+    /// When it entered the section it is in: its admission (it joins the
+    /// section it is filed in), or its last crossing (`Callback.onMove` adds it
+    /// at the end of the section it entered).
     entry: JoinSeq,
 }
 
@@ -56,8 +55,6 @@ pub struct EntityTable {
     rows: FxHashMap<NonZeroU32, ResidentRow>,
     extracted: FxHashMap<NonZeroU32, Location>,
     lifted: FxHashMap<Owner, usize>,
-    /// The section pass's movers, reused from pass to pass.
-    moved: Vec<(JoinSeq, NonZeroU32, [i32; 3])>,
 }
 impl EntityTable {
     /// Observe this game's existing structural-event sink.
@@ -68,7 +65,6 @@ impl EntityTable {
             rows: FxHashMap::default(),
             extracted: FxHashMap::default(),
             lifted: FxHashMap::default(),
-            moved: Vec::new(),
         }
     }
     /// Check the current owner and id once, returning its already located value.
@@ -152,7 +148,6 @@ impl EntityTable {
                         location,
                         details: identity.details,
                         admission,
-                        section: old.and_then(|row| row.section),
                         entry: old.map_or(admission, |row| row.entry),
                     };
                     if let Some(old) = self.rows.insert(identity.id, row) {
@@ -253,23 +248,16 @@ impl EntityTable {
         rows.into_iter().map(|(_, id)| id).collect()
     }
 
-    /// `Callback.onMove` for one level's members: `visit` notes each with its
-    /// current section. A member whose section changed since the last pass is
-    /// now at the end of its new section. Movers of one pass enter in lookup
-    /// order, as vanilla ticks them. The first section seen is where it joined.
-    pub fn note_sections(&mut self, visit: impl FnOnce(&mut SectionPass<'_>)) {
+    /// `Callback.onMove`: member `id` crossed into another section, so it is
+    /// at the end of that section now; its lookup place does not change. The
+    /// section authority calls this at the movement boundary, as each move
+    /// happens, so the order of the calls is the order of the moves: a move out
+    /// and back is two entries, and a passenger moved after its vehicle enters
+    /// after it.
+    pub fn entered_section(&mut self, id: u32) {
         self.drain();
-        visit(&mut SectionPass {
-            rows: &mut self.rows,
-            moved: &mut self.moved,
-        });
-        self.moved
-            .sort_unstable_by_key(|(admission, ..)| *admission);
-        for (_, id, section) in self.moved.drain(..) {
-            if let Some(row) = self.rows.get_mut(&id) {
-                row.section = Some(section);
-                row.entry = JoinSeq::next();
-            }
+        if let Some(row) = NonZeroU32::new(id).and_then(|id| self.rows.get_mut(&id)) {
+            row.entry = JoinSeq::next();
         }
     }
 
@@ -292,28 +280,6 @@ impl EntityTable {
         self.rows.clear();
         self.extracted.clear();
         self.lifted.clear();
-        self.moved.clear();
-    }
-}
-/// One section pass over a level's members (`EntityTable::note_sections`).
-pub struct SectionPass<'a> {
-    rows: &'a mut FxHashMap<NonZeroU32, ResidentRow>,
-    moved: &'a mut Vec<(JoinSeq, NonZeroU32, [i32; 3])>,
-}
-impl SectionPass<'_> {
-    /// Note that `id` is in `section` (`SectionPos` x, y, z) now.
-    pub fn note(&mut self, id: u32, section: [i32; 3]) {
-        let Some(row) = NonZeroU32::new(id).and_then(|id| self.rows.get_mut(&id)) else {
-            return;
-        };
-        match row.section {
-            None => row.section = Some(section),
-            Some(old) if old != section => {
-                self.moved
-                    .push((row.admission, NonZeroU32::new(id).unwrap(), section))
-            }
-            Some(_) => {}
-        }
     }
 }
 fn forget_row(map: &mut FxHashMap<NonZeroU32, ResidentRow>, id: NonZeroU32, location: Location) {

@@ -114,8 +114,6 @@ fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
         game.world.loaded_entities.push((a, first));
         game.world.loaded_entities.push((b, second));
         game.spawn_loaded_entities();
-        // Each tick ends noting the sections its entities are in.
-        game.note_entity_sections();
         let mut lookup = vec![snapshot(game)];
         // The chunk unloads with what it stores, then loads that again.
         let unloaded = game.entity_chunks(&HashSet::from([a]), true);
@@ -123,7 +121,6 @@ fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
         lookup.push(snapshot(game));
         game.world.loaded_entities.extend(unloaded);
         game.spawn_loaded_entities();
-        game.note_entity_sections();
         lookup.push(snapshot(game));
         // The pig leaves through a portal and comes back.
         let pig = game.mob_by_uuid([2703, 0, 0, 2]).unwrap();
@@ -152,7 +149,6 @@ fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
         );
         let arrow = game.creatures.projectiles.last().unwrap().id;
         game.persist.uuids.insert(arrow, [2703, 0, 0, 14]);
-        game.note_entity_sections();
         lookup.push(snapshot(game));
         // The TNT falls from section 4 into section -2, behind the armor stand.
         // Its id since the reload: the map still holds the one it had before.
@@ -161,8 +157,11 @@ fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
             .tnts
             .iter_mut()
             .find(|t| uuids.get(&t.id) == Some(&[2703, 0, 0, 1]));
-        tnt.unwrap().position.y = -20.0;
-        game.note_entity_sections();
+        let tnt = tnt.unwrap();
+        tnt.position.y = -20.0;
+        // Its movement boundary reports the crossing as it happens.
+        let tnt = tnt.id;
+        game.resident_entities.table.get_mut().entered_section(tnt);
         lookup.push(snapshot(game));
         let mut chunks = game.entity_chunks(&HashSet::from([a, b]), false);
         chunks.sort_by_key(|(key, _)| *key);

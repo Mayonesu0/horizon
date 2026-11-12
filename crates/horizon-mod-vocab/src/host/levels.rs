@@ -238,10 +238,13 @@ pub trait LevelsBackend {
     /// removal and re-admission moves an entity to the end. An entity spawned
     /// during play is admitted as it spawns, even when its id comes later. A
     /// chunk's entities join in the order it stored them: section by section,
-    /// each in the order its entities entered it, as vanilla stores them.
-    /// Section moves are noted once per level tick. Entities kept outside the
-    /// residency families (lingering potion clouds, lightning bolts, eyes of
-    /// ender) are not members.
+    /// each in the order its entities entered it, as vanilla stores them. A
+    /// section crossing is recorded as the entity moves (`Callback.onMove`): a
+    /// move out and back is two crossings, and a passenger enters after its
+    /// vehicle. Several moves within one entity's own tick count as one, from
+    /// where it was to where it ended. Entities kept outside the residency
+    /// families (lingering potion clouds, lightning bolts, eyes of ender) are
+    /// not members.
     /// Allocates a result buffer, not one allocation per entity; sorting is
     /// O(n log n), followed by one authoritative handle lookup per candidate.
     #[access(WorldOnly)]

@@ -1,5 +1,6 @@
 //! Section entry order (`EntitySection` after `Callback.onMove`) and the
-//! admission of an entity given its id after it spawned.
+//! admission of an entity given its id after it spawned. Crossings are told
+//! as they happen, by the movement boundary; these tests tell them directly.
 use super::*;
 use crate::join_seq::residency::Kind;
 
@@ -7,8 +8,6 @@ const HOME: Owner = Owner {
     dimension: DimensionKey::OVERWORLD,
     kind: Kind::Mob,
 };
-const LOW: [i32; 3] = [0, 4, 0];
-const HIGH: [i32; 3] = [0, 5, 0];
 
 fn emit(journal: &Journal, change: Change) {
     journal.push(Event {
@@ -24,16 +23,7 @@ fn admit(journal: &Journal, id: u32) -> Identity {
     identity
 }
 
-/// One section pass noting these members' sections.
-fn pass<const N: usize>(table: &mut EntityTable, members: [(u32, [i32; 3]); N]) {
-    table.note_sections(|pass| {
-        for (id, section) in members {
-            pass.note(id, section);
-        }
-    });
-}
-
-/// The ids in one section, in the order that section keeps them.
+/// The ids of one section, in the order that section keeps them.
 fn section(table: &mut EntityTable, ids: &[u32]) -> Vec<u32> {
     let entry = table.section_entry_order();
     let mut ids: Vec<_> = ids.iter().map(|&id| (entry(id).unwrap(), id)).collect();
@@ -42,47 +32,68 @@ fn section(table: &mut EntityTable, ids: &[u32]) -> Vec<u32> {
 }
 
 #[test]
-fn a_mover_enters_the_end_of_its_new_section_and_keeps_its_lookup_place() {
+fn a_move_right_after_joining_enters_the_end_of_the_section() {
     let journal = Journal::default();
     let mut table = EntityTable::new(journal.clone());
-    for id in [1, 2, 3] {
-        admit(&journal, id);
-    }
-    // 4 joins section HIGH directly, before anyone moves there.
-    admit(&journal, 4);
-    pass(&mut table, [(1, LOW), (2, LOW), (3, LOW), (4, HIGH)]);
-    pass(&mut table, [(1, LOW), (2, HIGH), (3, LOW), (4, HIGH)]);
-    pass(&mut table, [(1, HIGH), (2, HIGH), (3, LOW), (4, HIGH)]);
-    assert_eq!(section(&mut table, &[1, 2, 4]), vec![4, 2, 1]);
-    assert_eq!(section(&mut table, &[3]), vec![3]);
-    // Moving back is entering again: the end of the section it left.
-    pass(&mut table, [(1, HIGH), (2, LOW), (3, LOW), (4, HIGH)]);
-    assert_eq!(section(&mut table, &[2, 3]), vec![3, 2]);
-    // The lookup is a different list: a section move never reorders it.
-    assert_eq!(table.level_entities(HOME.dimension), vec![1, 2, 3, 4]);
+    // A joins section X, B joins section Y, then A moves into Y before
+    // anything else happens: vanilla's Y holds B, then A.
+    admit(&journal, 1);
+    admit(&journal, 2);
+    table.entered_section(1);
+    assert_eq!(section(&mut table, &[1, 2]), vec![2, 1]);
+    assert_eq!(table.level_entities(HOME.dimension), vec![1, 2]);
 }
 
 #[test]
-fn movers_of_one_pass_enter_in_lookup_order_and_a_put_back_keeps_its_place() {
+fn a_move_out_and_back_is_two_crossings() {
+    let journal = Journal::default();
+    let mut table = EntityTable::new(journal.clone());
+    // 1 and 2 are in X. Within one tick 1 steps into Y and back into X:
+    // vanilla removes it from X and adds it again, so X holds 2, then 1.
+    admit(&journal, 1);
+    admit(&journal, 2);
+    table.entered_section(1);
+    table.entered_section(1);
+    assert_eq!(section(&mut table, &[1, 2]), vec![2, 1]);
+}
+
+#[test]
+fn crossings_enter_in_the_order_they_happen_not_in_lookup_order() {
+    let journal = Journal::default();
+    let mut table = EntityTable::new(journal.clone());
+    // 5 joined the lookup before 9, and 7 is already in Y. 9 moves into Y,
+    // then 5 rides in after it (a passenger moves right after its vehicle).
+    admit(&journal, 5);
+    admit(&journal, 7);
+    admit(&journal, 9);
+    table.entered_section(9);
+    table.entered_section(5);
+    assert_eq!(section(&mut table, &[5, 7, 9]), vec![7, 9, 5]);
+    assert_eq!(table.level_entities(HOME.dimension), vec![5, 7, 9]);
+}
+
+#[test]
+fn a_put_back_keeps_its_place_and_a_readmission_enters_at_the_end() {
     let journal = Journal::default();
     let mut table = EntityTable::new(journal.clone());
     let first = admit(&journal, 9);
     admit(&journal, 5);
     admit(&journal, 7);
-    pass(&mut table, [(9, LOW), (5, LOW), (7, HIGH)]);
-    // Listed against lookup order: 5 and 9 still enter HIGH as 9, then 5.
-    pass(&mut table, [(5, HIGH), (9, HIGH), (7, HIGH)]);
-    assert_eq!(section(&mut table, &[5, 7, 9]), vec![7, 9, 5]);
+    table.entered_section(5);
+    assert_eq!(section(&mut table, &[5, 7, 9]), vec![9, 7, 5]);
     // A temporary extraction is not a move.
     emit(&journal, Change::Extract(first));
     emit(&journal, Change::PutBack(first));
-    assert_eq!(section(&mut table, &[5, 7, 9]), vec![7, 9, 5]);
+    assert_eq!(section(&mut table, &[5, 7, 9]), vec![9, 7, 5]);
     // Removal and re-admission is a new entity at the end (`addEntity`).
     emit(&journal, Change::Remove(first));
     emit(&journal, Change::Install(first));
-    pass(&mut table, [(9, HIGH)]);
     assert_eq!(section(&mut table, &[5, 7, 9]), vec![7, 5, 9]);
     assert_eq!(table.level_entities(HOME.dimension), vec![5, 7, 9]);
+    // A crossing told for an id that is no member changes nothing.
+    table.entered_section(0);
+    table.entered_section(42);
+    assert_eq!(section(&mut table, &[5, 7, 9]), vec![7, 5, 9]);
 }
 
 #[test]

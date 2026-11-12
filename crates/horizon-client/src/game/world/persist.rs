@@ -1756,7 +1756,7 @@ impl Game<'_> {
         let mut out: HashMap<(i32, i32), Vec<Tag>> =
             keys.iter().map(|k| (*k, Vec::new())).collect();
         {
-            let entry = self.section_entries();
+            let entry = self.resident_entities.table.get_mut().section_entry_order();
             for (key, mut tags) in roots {
                 tags.sort_by_cached_key(|(id, join, tag)| {
                     (section_order(tag), entry(*id).unwrap_or(*join))

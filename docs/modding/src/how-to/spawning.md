@@ -46,15 +46,16 @@ order, section by section from section 0 upward and then the negative sections,
 whatever storage family holds each entity. Each section keeps its entities in
 the order they entered it: an entity that crosses into another section goes to
 the end of that section, as vanilla's `onMove` puts it there, while its place in
-the lookup stays the same. A vehicle comes before its passengers.
+the lookup stays the same. Each crossing is recorded as the entity moves, in
+the order the moves happen: an entity that steps out of a section and back is
+at the end of it again, and a passenger enters after its vehicle. A vehicle
+comes before its passengers.
 
-Some differences remain. Section moves are noted once per level tick, after its
-entities have moved. An entity that leaves a section and comes back within one
-tick keeps its place, and the entities that move in one tick enter their new
-sections in lookup order, where vanilla follows its exact tick order (a
-passenger moves right after its vehicle). Entities that the engine keeps outside
-the residency families, such as lingering potion clouds, lightning bolts and
-eyes of ender, are not lookup members at all.
+Some differences remain. Several moves within one entity's own tick, such as an
+enderman's teleport and its walk, count as one crossing, from where it was to
+where it ended. Entities that the engine keeps outside the residency families,
+such as lingering potion clouds, lightning bolts and eyes of ender, are not
+lookup members at all.
 The call allocates buffers for the result and sorts admission keys; it does not
 allocate an object per entity. Cache the result when doing several passes in one
 hook rather than repeatedly crossing the host boundary.
