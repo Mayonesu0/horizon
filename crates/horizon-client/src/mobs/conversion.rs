@@ -18,6 +18,43 @@ impl Params {
         keep_equipment: true,
         preserve_can_pick_up_loot: true,
     };
+    /// `ConversionParams.single(mob, false, false)`: the old mob's gear stays
+    /// behind and the new mob keeps its own `canPickUpLoot` (`MushroomCow.shear`,
+    /// `Villager.thunderHit`).
+    pub const NONE: Self = Self {
+        keep_equipment: false,
+        preserve_can_pick_up_loot: false,
+    };
+}
+
+/// `ConversionParams.AfterConversion`: what the converting mob does once the
+/// new one exists (`MobEvent::Convert`'s `after`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum After {
+    /// No step: `Mob.convertTo` with a bare `ConversionParams.single`.
+    #[default]
+    None,
+    /// `AbstractPiglin.finishConversion` and `Hoglin.finishConversion`: the
+    /// new mob is nauseous for 10 seconds.
+    Nausea,
+    /// `Pig.thunderHit`: `populateDefaultEquipmentSlots` off the pig's own
+    /// random, then `setPersistenceRequired`.
+    ZombifiedPiglinGear,
+    /// `Villager.thunderHit`: `finalizeSpawn(CONVERSION)`, then
+    /// `setPersistenceRequired`.
+    Witch,
+    /// `Tadpole.ageUp`: `finalizeSpawn(CONVERSION)`, then
+    /// `setPersistenceRequired`.
+    Finalize,
+}
+
+impl After {
+    /// Whether the caller already asked `LivingConversionEvent.Pre`: the
+    /// lightning picks its outcome from the answer, so `convert_to` must not
+    /// ask again.
+    pub fn pre_checked(self) -> bool {
+        matches!(self, Self::ZombifiedPiglinGear | Self::Witch)
+    }
 }
 
 /// `ConversionType.SINGLE.convert` and `ConversionType.convertCommon`: `to`
@@ -63,7 +100,8 @@ pub fn single(from: &Mob, to: &mut Mob, params: Params) {
     to.extra.leash = from.extra.leash;
     to.extra.leash_pending = from.extra.leash_pending;
     to.extra.leash_player = from.extra.leash_player;
-    // convertCommon.
+    // convertCommon, in its order: the absorption first, then the effects.
+    to.absorption = from.absorption;
     to.extra.effects = from.extra.effects.clone();
     to.extra.effect_fallbacks = from.extra.effect_fallbacks.clone();
     to.extra.hidden_effects = from.extra.hidden_effects.clone();
@@ -166,6 +204,26 @@ mod tests {
             );
             assert!(bare.extra.main_hand.is_none() && bare.extra.chest.is_none());
             assert_eq!(bare.custom_name.as_deref(), Some("Frosty"));
+        });
+    }
+    /// `ConversionType.convertCommon` copies `getAbsorptionAmount`, so the
+    /// golden hearts an apple left on a zombie survive its turn into a drowned.
+    #[test]
+    fn a_converting_mob_keeps_its_absorption() {
+        with_test_world(&[], |_, types| {
+            let mob = |id, kind: &str| {
+                Mob::new(
+                    id,
+                    Arc::new(types.types[kind].clone()),
+                    Vec3::new(3.5, 70.0, -2.5),
+                    0.0,
+                )
+            };
+            let mut z = mob(1, "minecraft:zombie");
+            z.absorption = 3.0;
+            let mut d = mob(2, "minecraft:drowned");
+            single(&z, &mut d, Params::KEEP_ALL);
+            assert_eq!(d.absorption, 3.0, "the absorption crosses the conversion");
         });
     }
 }

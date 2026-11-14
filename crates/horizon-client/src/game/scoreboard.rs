@@ -326,10 +326,15 @@ impl Game<'_> {
                         ok = false;
                     }
                 }
-                let team = holder
-                    .as_deref()
-                    .and_then(|h| self.score.board.players_team(h))
-                    .map(|t| t.name.clone());
+                // TamableAnimal.getTeam: a tamed pet with no team of its own
+                // answers with its root owner's.
+                let team = match t {
+                    Target::Mob(id) => self.mob_team(id).map(|t| t.name.clone()),
+                    _ => holder
+                        .as_deref()
+                        .and_then(|h| self.score.board.players_team(h))
+                        .map(|t| t.name.clone()),
+                };
                 for (want, negated) in &s.teams {
                     let matches = match &team {
                         Some(name) => name == want,
@@ -529,15 +534,22 @@ impl Game<'_> {
             |v| v.wrapping_add(1),
         );
     }
-    /// `ServerPlayer.awardKillScore`: total kills and the team kill counts.
+    /// `ServerPlayer.awardKillScore`: total kills, the player kills and the
+    /// team kill counts, for the victim `victim`.
     pub(super) fn score_player_killed(&mut self, victim: Target) {
-        let victim_name = self.holder_name(victim);
+        let name = self.holder_name(victim);
+        self.score_player_killed_named(name, matches!(victim, Target::Player | Target::Guest(_)));
+    }
+    /// [`score_player_killed`](Self::score_player_killed) with the victim's
+    /// scoreboard name at hand: a guest's record is out of `self.lan` during
+    /// its turn (`ServerPlayer.die` runs there).
+    pub(super) fn score_player_killed_named(&mut self, victim_name: Option<String>, player: bool) {
         let display = self.player_display_comp();
         let me = self.acting_player_name().to_owned();
         let board = &mut self.score.board;
         let inc = |v: i32| v.wrapping_add(1);
         board.for_all_objectives_with(sb::CRITERIA_TOTAL_KILLS, &me, Some(&display), inc);
-        if victim == Target::Player {
+        if player {
             board.for_all_objectives_with(sb::CRITERIA_PLAYER_KILLS, &me, Some(&display), inc);
         }
         let color_of =
@@ -582,7 +594,7 @@ impl Game<'_> {
         self.team_with_owner(m.id, || tame_owner(m))
     }
     /// A mob's own team, else its tamed owner's (`owner` is asked only then).
-    fn team_with_owner(
+    pub(super) fn team_with_owner(
         &self,
         id: u32,
         owner: impl FnOnce() -> Option<[i32; 4]>,
@@ -642,6 +654,31 @@ impl Game<'_> {
                 })
                 .collect(),
         }
+    }
+    /// The carts (indices into `carts`, as `near` holds them) that cart `i`
+    /// pushes this tick, as `OldMinecartBehavior.pushAndPickupEntities` asks
+    /// `EntitySelector.pushableBy(cart)`: a moving rideable cart keeps only
+    /// what its own team's and the target's collision rules allow; a still or
+    /// unrideable cart pushes every minecart in its box (no team filter).
+    pub(super) fn cart_push_allowed(
+        &self,
+        carts: &[super::minecarts::Minecart],
+        i: usize,
+        near: &[u32],
+    ) -> Vec<bool> {
+        let v = carts[i].velocity;
+        let moving =
+            carts[i].kind == super::minecarts::CartKind::Rideable && v.x * v.x + v.z * v.z >= 0.01;
+        if !moving {
+            return vec![true; near.len()];
+        }
+        let own = self.team_with_owner(carts[i].id, || None);
+        near.iter()
+            .map(|&j| {
+                let target = &carts[j as usize];
+                sb::pushable_by(own, self.team_with_owner(target.id, || None), true)
+            })
+            .collect()
     }
     /// The mobs on the player's team (`isAlliedTo`).
     pub(super) fn player_allies(&self) -> HashSet<u32> {
@@ -1232,3 +1269,6 @@ mod criterion_tests;
 mod empty_tag_tests;
 #[cfg(test)]
 mod guest_advancement_tests;
+
+#[cfg(test)]
+mod selector_option_tests;

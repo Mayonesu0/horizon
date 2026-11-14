@@ -244,6 +244,11 @@ impl Game<'_> {
         if !m.extra.saddled || food || self.keys.held(Action::Sneak) {
             return false;
         }
+        // `Strider.canAddPassenger`: a strider whose eyes are in lava has no
+        // seat, though the click still counts as used.
+        if m.species() == Species::Strider && m.fluids.eye_in_lava {
+            return true;
+        }
         let id = m.id;
         if !self.native_may_board(id) {
             return true;
@@ -280,7 +285,6 @@ impl Game<'_> {
                     // `hurtAndConvertOnBreak`: the stick breaks (the broken
                     // statistic and `onEquippedItemBroken`), then what is
                     // left is the rod, not a fresh plain one.
-                    self.award_stat("broken", &stack.item, 1);
                     self.player_equipment_broke(
                         horizon_world::player_inventory::EquipmentSlot::MainHand,
                         &stack,
@@ -1605,7 +1609,7 @@ mod tests {
 
     /// A server-side game with nothing in it but an empty chunk, or None when
     /// the prepared resources are missing (CI has no vanilla data).
-    fn server_game() -> Option<Game<'static>> {
+    pub(super) fn server_game() -> Option<Game<'static>> {
         use crate::game::{Audio, Options, Progress, Settings, load_resources};
         let root = std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
@@ -1696,7 +1700,8 @@ mod tests {
         let mut m = horizon_client::mobs::Mob::new(id, kind, Vec3::new(at[0], at[1], at[2]), 0.0);
         m.extra.tame = true;
         m.health = m.attrs.max_health;
-        m.random = horizon_core::random::LegacyRandom::new(seed);
+        m.random =
+            horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(seed));
         game.mobs.clear();
         game.mobs.push(m);
     }
@@ -1814,3 +1819,7 @@ mod tests {
 #[cfg(test)]
 #[path = "camel_jump_tests.rs"]
 mod camel_jump_tests;
+
+#[cfg(test)]
+#[path = "strider_lava_boarding_tests.rs"]
+mod strider_lava_boarding_tests;

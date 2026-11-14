@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import io
 import json
 import os
 from pathlib import Path
@@ -26,8 +27,8 @@ POSIX_BASH = BASH is not None and not (
     os.name == "nt" and os.path.dirname(os.path.normcase(BASH)).endswith(os.path.normcase(r"\system32")))
 
 
-def args(host="local", quick=False):
-    return argparse.Namespace(host=host, quick=quick)
+def args(host="local", quick=False, harnesses=False):
+    return argparse.Namespace(host=host, quick=quick, harnesses=harnesses)
 
 
 class GitChangedPathsTests(unittest.TestCase):
@@ -409,9 +410,29 @@ class PrReadyTests(unittest.TestCase):
         self.assertEqual(by_name["launcher clippy"].status, "skip")
         self.assertIsNone(by_name["clippy"].status)
         with mock.patch.object(pr_ready, "affected_here", return_value=["food"]):
-            steps = pr_ready.plan(args(host="macmini"), "origin/main", changed, {"horizon-world": "crates/horizon-world"}, {"horizon-world"}, {})
+            steps = pr_ready.plan(args(host="macmini", harnesses=True), "origin/main", changed, {"horizon-world": "crates/horizon-world"}, {"horizon-world"}, {})
         self.assertIn("--changed-files", steps[-1].command)
         self.assertIn("crates/horizon-world/src/food.rs", steps[-1].command)
+
+    def test_harnesses_run_only_where_ci_s_parity_job_would(self):
+        packages = {"horizon-world": "crates/horizon-world"}
+        code = {"crates/horizon-world/src/food.rs"}
+        self.assertFalse(pr_ready.runs_parity(code))
+        for path in ("tools/test_food_parity.py", "tools/parity.py", "tools/lab.py", "tools/parity_hosts.json",
+                     "mods/horizon/src/test/java/dev/horizonlab/parity/VanillaFoodOracle.java",
+                     "crates/horizon-world/examples/food_probe.rs", "crates/horizon-client/src/game/sculk_fixture.rs",
+                     ".github/workflows/parity-main.yml"):
+            with self.subTest(path=path):
+                self.assertTrue(pr_ready.runs_parity(code | {path}))
+        with mock.patch.object(pr_ready, "affected_here", return_value=["food", "light"]):
+            steps = pr_ready.plan(args(host="macmini"), "origin/main", code, packages, {"horizon-world"}, {})
+            self.assertEqual(steps[-1].status, "list")
+            self.assertIsNone(steps[-1].command)
+            self.assertIn("2 affected, left to parity-main on main", steps[-1].detail)
+            self.assertIn("--harnesses runs them here", steps[-1].detail)
+            steps = pr_ready.plan(args(host="macmini"), "origin/main", code | {"tools/test_food_parity.py"}, packages,
+                                  {"horizon-world"}, {})
+            self.assertIn("--changed-files", steps[-1].command)
 
     def test_ci_s_rust_follows_the_six_week_train(self):
         self.assertEqual(pr_ready.ci_rust(datetime.date(2025, 2, 20)), 85)
@@ -452,6 +473,26 @@ class PrReadyTests(unittest.TestCase):
                                                  "their current inputs.\nNothing to run: every harness passed."),
                          "no harness affected")
         self.assertEqual(pr_ready.duration(125), "2 min 5 s")
+
+    def test_unittest_summary_keeps_skips_and_expected_failures(self):
+        class Outcomes(unittest.TestCase):
+            def test_pass(self):
+                self.assertTrue(True)
+
+            @unittest.skip("fixture platform is unavailable")
+            def test_skip(self):
+                self.fail("must not run")
+
+            @unittest.expectedFailure
+            def test_expected_failure(self):
+                self.fail("known fixture failure")
+
+        stream = io.StringIO()
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(Outcomes)
+        result = unittest.TextTestRunner(stream=stream).run(suite)
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual(pr_ready.unittest_passed(stream.getvalue()),
+                         "3 run, OK (skipped=1, expected failures=1)")
 
     def test_python_checks_run_beside_cargo_and_harnesses_after_it(self):
         steps = pr_ready.plan(args(), "origin/main", {"crates/horizon-core/src/lib.rs"}, PACKAGES, LIBRARIES,
